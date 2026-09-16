@@ -8,6 +8,7 @@ via `Task.apply`, which does not require a broker.
 from celery import Celery
 
 TASK_NAME = "agent_platform.runtime.dispatch.execute_run"
+RESUME_TASK_NAME = "agent_platform.runtime.dispatch.resume_run"
 _TASKS_MODULE = "agent_platform.runtime.dispatch.tasks"
 
 
@@ -34,3 +35,13 @@ def enqueue_run(app: Celery, run_id: str) -> None:
         tasks.execute_run.apply(args=[run_id])
         return
     app.send_task(TASK_NAME, args=[run_id])
+
+
+def enqueue_resume(app: Celery, run_id: str) -> None:
+    """Dispatch one Run for worker-side resume (same contract as enqueue_run)."""
+    if app.conf.task_always_eager:
+        from agent_platform.runtime.dispatch import tasks
+
+        tasks.resume_run.apply(args=[run_id])
+        return
+    app.send_task(RESUME_TASK_NAME, args=[run_id])

@@ -38,6 +38,30 @@ def test_run_manager_rejects_invalid_lifecycle_transition():
         manager.complete_run(run.id)
 
 
+def test_run_manager_requeues_failed_and_cancelled_runs():
+    store = InMemoryRuntimeStore()
+    manager = RunManager(store)
+
+    failed = manager.create_run(application_id="app-1", session_id="session-1", runtime_type="agent")
+    manager.start_run(failed.id)
+    manager.fail_run(failed.id, error="boom")
+    requeued = manager.requeue_run(failed.id)
+
+    assert requeued.status is RunStatus.QUEUED
+    assert requeued.error is None
+    assert requeued.completed_at is None
+
+    cancelled = manager.create_run(application_id="app-1", session_id="session-1", runtime_type="agent")
+    manager.cancel_run(cancelled.id)
+    assert manager.requeue_run(cancelled.id).status is RunStatus.QUEUED
+
+    completed = manager.create_run(application_id="app-1", session_id="session-1", runtime_type="agent")
+    manager.start_run(completed.id)
+    manager.complete_run(completed.id)
+    with pytest.raises(ValueError, match="cannot requeue"):
+        manager.requeue_run(completed.id)
+
+
 def test_event_bus_publishes_and_replays_events():
     store = InMemoryRuntimeStore()
     event_bus = EventBus(store)
@@ -162,3 +186,31 @@ def test_event_bus_isolates_failing_subscribers():
 
 def test_in_memory_store_satisfies_runtime_store_contract():
     assert isinstance(InMemoryRuntimeStore(), RuntimeStore)
+
+
+def test_in_memory_store_lists_applications_sessions_and_runs():
+    store = InMemoryRuntimeStore()
+    runs = RunManager(store)
+    apps = SessionManager(store)
+
+    application_a = apps.create_application(name="a")
+    application_b = apps.create_application(name="b")
+    session_a1 = apps.create_session(application_id=application_a.id)
+    session_a2 = apps.create_session(application_id=application_a.id)
+    apps.create_session(application_id=application_b.id)
+    run_a1 = runs.create_run(application_id=application_a.id, session_id=session_a1.id, runtime_type="agent")
+    runs.create_run(application_id=application_a.id, session_id=session_a2.id, runtime_type="agent")
+    runs.create_run(application_id=application_b.id, session_id="session-b", runtime_type="workflow")
+
+    assert [a.id for a in store.list_applications()] == [application_a.id, application_b.id]
+    assert len(store.list_sessions()) == 3
+    assert [s.id for s in store.list_sessions(application_id=application_a.id)] == [
+        session_a1.id,
+        session_a2.id,
+    ]
+    assert len(store.list_runs()) == 3
+    assert [r.id for r in store.list_runs(application_id=application_b.id)] == [
+        r.id for r in store.list_runs() if r.application_id == application_b.id
+    ]
+    assert [r.id for r in store.list_runs(application_id=application_a.id, session_id=session_a1.id)] == [run_a1.id]
+    assert store.list_runs(application_id="missing") == []

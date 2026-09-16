@@ -150,6 +150,14 @@ class SQLAlchemyRuntimeStore:
             else None
         )
 
+    def list_applications(self) -> list[Application]:
+        with self.engine.connect() as conn:
+            rows = conn.execute(select(_applications)).mappings().all()
+        return [
+            Application(id=row["id"], name=row["name"], metadata=row["metadata"] or {})
+            for row in rows
+        ]
+
     def save_session(self, session: Session) -> None:
         with self.engine.begin() as conn:
             conn.execute(
@@ -168,6 +176,21 @@ class SQLAlchemyRuntimeStore:
             if row
             else None
         )
+
+    def list_sessions(self, application_id: str | None = None) -> list[Session]:
+        conditions = []
+        if application_id is not None:
+            conditions.append(_sessions.c.application_id == application_id)
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                select(_sessions).where(*conditions)
+            ).mappings().all()
+        return [
+            Session(
+                id=row["id"], application_id=row["application_id"], metadata=row["metadata"] or {}
+            )
+            for row in rows
+        ]
 
     # -- runs ------------------------------------------------------------------
 
@@ -212,6 +235,37 @@ class SQLAlchemyRuntimeStore:
             started_at=row["started_at"],
             completed_at=row["completed_at"],
         )
+
+    def list_runs(
+        self, application_id: str | None = None, session_id: str | None = None
+    ) -> list[Run]:
+        from agent_platform.runtime.core.models import RunStatus
+
+        conditions = []
+        if application_id is not None:
+            conditions.append(_runs.c.application_id == application_id)
+        if session_id is not None:
+            conditions.append(_runs.c.session_id == session_id)
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                select(_runs).where(*conditions).order_by(_runs.c.created_at)
+            ).mappings().all()
+        return [
+            Run(
+                id=row["id"],
+                application_id=row["application_id"],
+                session_id=row["session_id"],
+                runtime_type=row["runtime_type"],
+                status=RunStatus(row["status"]),
+                input=row["input"] or {},
+                output=row["output"] or {},
+                error=row["error"],
+                created_at=row["created_at"],
+                started_at=row["started_at"],
+                completed_at=row["completed_at"],
+            )
+            for row in rows
+        ]
 
     # -- state -----------------------------------------------------------------
 

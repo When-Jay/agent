@@ -17,6 +17,7 @@ Subscriber = Callable[["RuntimeEvent"], None]
 class RuntimeEventType(str, Enum):
     # Run lifecycle
     RUN_STARTED = "RunStarted"
+    RUN_RESUMED = "RunResumed"
     RUN_COMPLETED = "RunCompleted"
     RUN_FAILED = "RunFailed"
     RUN_CANCELLED = "RunCancelled"
@@ -45,8 +46,7 @@ class RuntimeEventType(str, Enum):
     CHECKPOINT_CREATED = "CheckpointCreated"
 
     # Reserved (see runtime-spec.md section 8):
-    # RunPaused, RunResumed, ApprovalRequired, UserInputRequired,
-    # HumanResponseReceived.
+    # RunPaused, ApprovalRequired, UserInputRequired, HumanResponseReceived.
 
 
 @dataclass(frozen=True)

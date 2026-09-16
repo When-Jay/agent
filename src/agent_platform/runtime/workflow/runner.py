@@ -23,6 +23,7 @@ from agent_platform.runtime.workflow.definition import WorkflowDefinition
 from agent_platform.runtime.workflow.engine import Superstep, WorkflowEngine
 from agent_platform.runtime.workflow.langgraph_engine import LangGraphWorkflowEngine
 from agent_platform.runtime.workflow.nodes import NodeExecutor, WorkflowNodeError
+from agent_platform.runtime.workflow.registry import WorkflowRegistry
 
 
 @dataclass(frozen=True)
@@ -33,13 +34,26 @@ class WorkflowRunResult:
 
 
 class WorkflowRunner:
-    def __init__(self, store: RuntimeStore, *, engine: WorkflowEngine | None = None) -> None:
+    def __init__(
+        self,
+        store: RuntimeStore,
+        *,
+        engine: WorkflowEngine | None = None,
+        registry: WorkflowRegistry | None = None,
+    ) -> None:
         self._store = store
         self._engine = engine or LangGraphWorkflowEngine()
+        self._registry = registry
         self._runs = RunManager(store)
         self._states = StateManager(store)
         self._events = EventBus(store)
         self._checkpoints = CheckpointStore(store)
+
+    def resolve(self, name: str, version: str | None = None) -> WorkflowDefinition:
+        """Resolve a name@version reference through the registry (dispatch path)."""
+        if self._registry is None:
+            raise KeyError("no workflow registry configured on this runner")
+        return self._registry.resolve(name, version)
 
     def run(
         self,

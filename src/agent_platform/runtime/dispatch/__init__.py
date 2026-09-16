@@ -9,6 +9,7 @@ from agent_platform.runtime.dispatch.orchestrator import (
     RuntimeOrchestrator,
     build_agent_adapter,
     build_default_orchestrator,
+    build_workflow_runner,
     create_runtime_store,
 )
 
@@ -17,6 +18,7 @@ __all__ = [
     "RuntimeOrchestrator",
     "build_agent_adapter",
     "build_default_orchestrator",
+    "build_workflow_runner",
     "create_celery_app",
     "create_runtime_store",
     "enqueue_run",

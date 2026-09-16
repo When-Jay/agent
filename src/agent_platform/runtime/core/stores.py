@@ -30,17 +30,36 @@ class InMemoryRuntimeStore:
     def get_application(self, application_id: str) -> Application | None:
         return self.applications.get(application_id)
 
+    def list_applications(self) -> list[Application]:
+        return list(self.applications.values())
+
     def save_session(self, session: Session) -> None:
         self.sessions[session.id] = session
 
     def get_session(self, session_id: str) -> Session | None:
         return self.sessions.get(session_id)
 
+    def list_sessions(self, application_id: str | None = None) -> list[Session]:
+        sessions = self.sessions.values()
+        if application_id is not None:
+            sessions = [s for s in sessions if s.application_id == application_id]
+        return list(sessions)
+
     def save_run(self, run: Run) -> None:
         self.runs[run.id] = run
 
     def get_run(self, run_id: str) -> Run | None:
         return self.runs.get(run_id)
+
+    def list_runs(
+        self, application_id: str | None = None, session_id: str | None = None
+    ) -> list[Run]:
+        runs = self.runs.values()
+        if application_id is not None:
+            runs = [r for r in runs if r.application_id == application_id]
+        if session_id is not None:
+            runs = [r for r in runs if r.session_id == session_id]
+        return list(runs)
 
     def get_state(self, run_id: str) -> State | None:
         return self.states.get(run_id)

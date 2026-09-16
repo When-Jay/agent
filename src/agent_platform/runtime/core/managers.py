@@ -67,6 +67,15 @@ class RunManager:
             raise InvalidStateTransitionError(f"cannot restart run from {run.status.value}")
         return self._save(replace(run, status=RunStatus.RUNNING, error=None))
 
+    def requeue_run(self, run_id: str) -> Run:
+        """Retry transition: move a failed/cancelled run back to QUEUED for re-dispatch."""
+        run = self._get_run(run_id)
+        if run.status not in {RunStatus.FAILED, RunStatus.CANCELLED}:
+            raise InvalidStateTransitionError(f"cannot requeue run from {run.status.value}")
+        return self._save(
+            replace(run, status=RunStatus.QUEUED, error=None, completed_at=None)
+        )
+
     def get_run(self, run_id: str) -> Run:
         return self._get_run(run_id)
 

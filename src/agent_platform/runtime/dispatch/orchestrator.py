@@ -4,12 +4,14 @@ Worker-side entry point (runtime-dispatch-spec.md section 4):
 
 1. Load the Run from the durable store.
 2. Skip terminal runs (idempotency: retried tasks never re-execute).
-3. Route by `runtime_type` to the Agent Runtime adapter (or the
-   workflow path once definition loading is wired).
+3. Route by `runtime_type`: "agent" to the DeepAgents adapter,
+   "workflow" to the WorkflowRunner (definition resolved by
+   name@version from application metadata through the registry).
 """
 
 import asyncio
 import logging
+from typing import Any
 
 from agent_platform.config import Settings
 from agent_platform.runtime.core import (
@@ -19,6 +21,7 @@ from agent_platform.runtime.core import (
     RunStatus,
     RuntimeEventType,
     RuntimeStore,
+    SessionManager,
 )
 
 logger = logging.getLogger(__name__)
@@ -55,12 +58,15 @@ class RuntimeOrchestrator:
         store: RuntimeStore,
         *,
         agent_adapter=None,
+        workflow_runner=None,
         event_bus: EventBus | None = None,
     ) -> None:
         self._store = store
         self._runs = RunManager(store)
+        self._apps = SessionManager(store)
         self.events = event_bus or EventBus(store)
         self._agent_adapter = agent_adapter
+        self._workflow_runner = workflow_runner
 
     def execute(self, run_id: str) -> None:
         run = self._runs.get_run(run_id)
@@ -78,6 +84,28 @@ class RuntimeOrchestrator:
         else:
             self._fail(run_id, f"unknown runtime_type: {run.runtime_type}")
 
+    def resume(self, run_id: str) -> None:
+        """Resume a failed Run (recovery path, runtime-spec.md section 3).
+
+        V1 supports failed workflow runs only: workflow resume continues
+        from the engine's in-process state (LangGraph memory checkpointer),
+        so the same WorkflowRunner instance must serve the resumed
+        execution. Agent resume waits for durable checkpoint payloads
+        (deepagents-runtime-spec.md section 8).
+        """
+        run = self._runs.get_run(run_id)
+        if run.status is not RunStatus.FAILED:
+            logger.info("run %s not resumable from %s; skipping", run_id, run.status.value)
+            return
+        if run.runtime_type == "workflow":
+            self._resume_workflow(run_id)
+        else:
+            logger.info(
+                "resume not supported for runtime_type %s (run %s); skipping",
+                run.runtime_type,
+                run_id,
+            )
+
     # --- routing ------------------------------------------------------------
 
     def _execute_agent(self, run_id: str) -> None:
@@ -87,9 +115,65 @@ class RuntimeOrchestrator:
         asyncio.run(self._agent_adapter.run(run_id))
 
     def _execute_workflow(self, run_id: str) -> None:
-        # V1: workflow definition loading is not wired to dispatch yet.
-        self._runs.start_run(run_id)
-        self._fail(run_id, "workflow dispatch is not available in V1")
+        if self._workflow_runner is None:
+            self._fail(run_id, "workflow runtime is not configured")
+            return
+        run = self._runs.get_run(run_id)
+        reference = self._workflow_reference(run)
+        try:
+            definition = self._workflow_runner.resolve(
+                reference.get("name", ""), reference.get("version")
+            )
+        except KeyError as exc:
+            self._fail(run_id, exc.args[0] if exc.args else str(exc))
+            return
+        try:
+            self._workflow_runner.run(run_id=run_id, definition=definition, input=run.input)
+        except Exception as exc:  # noqa: BLE001 - normalize dispatch failures
+            logger.exception("workflow run %s failed", run_id)
+            self._fail(run_id, str(exc))
+
+    def _resume_workflow(self, run_id: str) -> None:
+        if self._workflow_runner is None:
+            self._fail_resume(run_id, "workflow runtime is not configured")
+            return
+        run = self._runs.get_run(run_id)
+        reference = self._workflow_reference(run)
+        try:
+            definition = self._workflow_runner.resolve(
+                reference.get("name", ""), reference.get("version")
+            )
+        except KeyError as exc:
+            self._fail_resume(run_id, exc.args[0] if exc.args else str(exc))
+            return
+        self.events.publish(
+            run_id=run_id,
+            event_type=RuntimeEventType.RUN_RESUMED,
+            payload={"reason": "manual"},
+        )
+        try:
+            self._workflow_runner.resume(run_id=run_id, definition=definition)
+        except Exception as exc:  # noqa: BLE001 - normalize resume failures
+            logger.exception("workflow resume %s failed", run_id)
+            self._fail_resume(run_id, str(exc))
+
+    def _fail_resume(self, run_id: str, error: str) -> None:
+        """Record a resume failure without clobbering an already-failed run.
+
+        The runner restarts FAILED -> RUNNING before execution; a failure
+        before that point leaves the run FAILED, and the original error
+        must be preserved instead of re-failing (which is not a legal
+        transition from FAILED).
+        """
+        run = self._runs.get_run(run_id)
+        if run.status is RunStatus.RUNNING:
+            self._fail(run_id, error)
+        else:
+            logger.warning("resume of run %s aborted before restart: %s", run_id, error)
+
+    def _workflow_reference(self, run) -> dict[str, Any]:
+        application = self._apps.get_application(run.application_id)
+        return dict((application.metadata or {}).get("workflow", {}))
 
     def _fail(self, run_id: str, error: str) -> None:
         self._runs.fail_run(run_id, error=error)
@@ -124,13 +208,21 @@ def build_agent_adapter(store: RuntimeStore, *, event_bus: EventBus):
     )
 
 
+def build_workflow_runner(store: RuntimeStore):
+    """Compose the default WorkflowRunner (LangGraph engine) over Runtime Core."""
+    from agent_platform.runtime.workflow import WorkflowRunner
+
+    return WorkflowRunner(store)
+
+
 def build_default_orchestrator(settings: Settings | None = None) -> RuntimeOrchestrator:
-    """Worker-side default composition: store + agent adapter + shared bus."""
+    """Worker-side default composition: store + runtimes + shared bus."""
     settings = settings or Settings()
     store = create_runtime_store(settings.database_url)
     events = EventBus(store)
     return RuntimeOrchestrator(
         store,
         agent_adapter=build_agent_adapter(store, event_bus=events),
+        workflow_runner=build_workflow_runner(store),
         event_bus=events,
     )

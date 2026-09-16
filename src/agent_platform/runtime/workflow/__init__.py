@@ -9,6 +9,7 @@ from agent_platform.runtime.workflow.definition import (
 from agent_platform.runtime.workflow.engine import WorkflowEngine
 from agent_platform.runtime.workflow.langgraph_engine import LangGraphWorkflowEngine
 from agent_platform.runtime.workflow.nodes import NodeExecutor, WorkflowNodeError
+from agent_platform.runtime.workflow.registry import WorkflowRegistry
 from agent_platform.runtime.workflow.runner import WorkflowRunner, WorkflowRunResult
 
 __all__ = [
@@ -20,6 +21,7 @@ __all__ = [
     "WorkflowDefinitionError",
     "WorkflowEngine",
     "WorkflowNodeError",
+    "WorkflowRegistry",
     "WorkflowRunner",
     "WorkflowRunResult",
 ]

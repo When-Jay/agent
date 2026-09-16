@@ -10,7 +10,7 @@ import logging
 from collections.abc import Callable
 
 from agent_platform.config import Settings
-from agent_platform.runtime.dispatch.celery_app import TASK_NAME, create_celery_app
+from agent_platform.runtime.dispatch.celery_app import RESUME_TASK_NAME, TASK_NAME, create_celery_app
 
 logger = logging.getLogger(__name__)
 
@@ -41,4 +41,12 @@ def execute_run(run_id: str) -> str:
     builder = _orchestrator_builder or _default_builder
     orchestrator = builder()
     orchestrator.execute(run_id)
+    return run_id
+
+
+@celery_app.task(name=RESUME_TASK_NAME)
+def resume_run(run_id: str) -> str:
+    builder = _orchestrator_builder or _default_builder
+    orchestrator = builder()
+    orchestrator.resume(run_id)
     return run_id
