@@ -2,130 +2,146 @@
 
 ## 1. Objective
 
-Agent Runtime 提供统一的 Agent 执行能力。
+Agent Runtime 提供平台级 Agent 执行入口，但不自研 Agent Loop。
 
 Agent Runtime 的核心职责：
 
-> 根据当前 State 和 Context，由 Model 产生下一步 Decision，并驱动 Tool / Sub-Agent / Final Response，直到满足终止条件。
+> 将平台 Run、Policy、Tool、Workspace、Sandbox、Budget、Observability 适配到 LangChain / DeepAgents，并将执行结果映射回 Runtime Core。
 
 ---
 
-## 2. Execution Loop
+## 2. Execution Model
 
 ```text
-Load State
+Load Run
    ↓
-Build Context
+Load Application / Agent configuration
    ↓
-Invoke Model
+Build DeepAgents backend from Workspace / Sandbox
    ↓
-Parse Decision
+Build LangChain tools from platform tool registry
    ↓
-Execute Action
+Build middleware stack
    ↓
-Update State
+create_deep_agent(...)
    ↓
-Emit Event
+Invoke / stream LangGraph execution
    ↓
-Checkpoint
+Map callbacks/events to RuntimeEvent
    ↓
-Stop?
- ┌─┴─┐
-Yes No
- |   |
-End  Next Turn
+Persist checkpoints / artifacts / final output
 ```
 
 ---
 
-## 3. Reserved Components
+## 3. Required Components
+
+```text
+DeepAgentsRuntimeAdapter
+LangChainToolAdapter
+PlatformMiddlewareStack
+PlatformBackendAdapter
+RuntimeEventCallbackHandler
+RuntimeCheckpointBridge
+RunResultMapper
+```
+
+这些组件必须保持职责独立。
+
+The following components are NOT platform-owned implementation targets:
 
 ```text
 AgentLoop
-ContextManager
 DecisionEngine
+ContextManager
 ToolExecutor
 MemoryManager
 SkillManager
 SubAgentManager
-BudgetController
 StopController
-CheckpointManager
 ```
 
-这些组件必须保持职责独立。
+If these names exist in code, they should be treated as temporary experimental code and replaced with LangChain / DeepAgents adapters.
 
 ---
 
 ## 4. Agent State
 
-至少预留：
+Platform state stores durable metadata and references:
 
 ```text
-messages
-context
-tool_calls
+run_id
+thread_id / checkpoint_id
+agent_config_id
+status
+input
+output
 artifacts
+runtime_events
 metadata
-variables
-budget
-execution_status
-stop_reason
+error
 ```
 
-State 不应直接暴露底层数据库模型。
+LangChain / LangGraph owns message state and internal agent graph state.
+
+State 不应直接暴露底层数据库模型，也不应要求 Runtime Core import LangChain / DeepAgents concrete types.
 
 ---
 
-## 5. Stop Conditions
+## 5. Middleware Responsibilities
 
-预留：
+Platform-specific behavior should be middleware:
 
 ```text
-FinalAnswer
-MaxTurns
-MaxTokens
-MaxCost
-MaxToolCalls
-Timeout
-UserCancelled
-Error
-PolicyViolation
+Budget / token / cost control
+Tool permission filtering
+Human approval
+Tenant policy enforcement
+Sensitive data filtering
+Runtime event emission
+Langfuse trace enrichment
+Model routing / fallback
+Memory injection
+Skill discovery / prompt injection
 ```
 
 ---
 
 ## 6. Framework Boundary
 
-Agent Runtime 不依赖特定 Agent Framework。
+Agent Runtime explicitly depends on LangChain / DeepAgents at the adapter layer.
 
-可以适配：
+Allowed:
 
 ```text
-Claude Agent SDK
-DeepAgents
-OpenClaw
-Pi Agent
-Custom Agent Loop
+Agent Runtime Adapter -> DeepAgents / LangChain
+Middleware -> Runtime Core interfaces
+Backend Adapter -> Sandbox / Workspace interfaces
 ```
 
-Framework Adapter 属于实现层。
+Forbidden:
 
-不得反向污染 Runtime Core。
+```text
+Runtime Core -> LangChain / DeepAgents
+API -> DeepAgents / LangChain direct execution
+Custom platform AgentLoop replacing create_deep_agent()
+Custom platform middleware system duplicating LangChain middleware
+```
 
 ---
 
 ## 7. Acceptance Criteria
 
 * Agent 可以启动 Run
-* Agent 可以执行多轮 Loop
-* Agent 可以调用 Tool
+* Agent 执行通过 DeepAgents / LangChain 完成
+* Agent 可以通过 LangChain Tool 调用平台 Tool
 * Agent 可以产生标准 Event
-* Agent 可以 Checkpoint
+* Agent 可以通过 LangGraph / platform bridge Checkpoint
 * Agent 可以 Resume
-* Agent 可以触发 Budget / Stop
+* Agent 可以通过 middleware 触发 Budget / Stop / HITL
 * Agent 可以返回 Final Answer
-* Agent Framework 可以替换而不修改 Runtime Core
+* Runtime Core 不依赖 LangChain / DeepAgents concrete types
+* Existing custom AgentLoop implementation is removed or no longer used by production code
 
 
 

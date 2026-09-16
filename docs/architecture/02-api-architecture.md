@@ -60,9 +60,31 @@ Application
          +-- Run
 ```
 
-API 创建 Run 后，将执行请求交给 Runtime。
+API 创建 Run 后，将执行请求持久化到 PostgreSQL，并通过 Celery 将执行任务投递给 Runtime Worker。
 
 API 不直接执行 Agent。
+
+```text
+Client
+  ↓
+API
+  ↓
+PostgreSQL: create Run(status=queued)
+  ↓
+Celery enqueue(run_id)
+  ↓
+Redis broker
+  ↓
+Runtime Worker
+  ↓
+Runtime executes Run
+  ↓
+PostgreSQL: status/events/checkpoints/artifacts
+```
+
+API request handler MUST NOT call Agent Runtime or Workflow Runtime directly.
+
+API should return after Run creation and dispatch. Clients observe progress through Run query APIs and streaming APIs.
 
 ---
 
@@ -73,14 +95,15 @@ API 不直接执行 Agent。
 ```text
 Run Event
     |
-    v
-Redis Stream / Event Stream
+    +--> PostgreSQL durable event log
     |
-    v
-API
-    |
-    v
-Client
+    +--> Redis Stream / PubSub for low-latency delivery
+             |
+             v
+            API
+             |
+             v
+          Client
 ```
 
 Streaming 不作为 Runtime 的核心业务逻辑。
@@ -88,6 +111,8 @@ Streaming 不作为 Runtime 的核心业务逻辑。
 Runtime 产生 Event。
 
 API 负责将 Event 暴露给客户端。
+
+PostgreSQL remains the durable source of truth. Redis streaming is an optimization for live updates.
 
 ---
 

@@ -28,6 +28,15 @@ Runtime 通过统一的 Runtime Core 和 Capability 接口访问这些能力。
                     API Layer
                        |
                        v
+             PostgreSQL Run Record
+                       |
+                       v
+             Celery Task Queue (Redis)
+                       |
+                       v
+                Runtime Worker
+                       |
+                       v
                 +--------------+
                 | Run          |
                 | Orchestrator |
@@ -55,9 +64,15 @@ Runtime 通过统一的 Runtime Core 和 Capability 接口访问这些能力。
       Capability   Capability    Capability
           |
       +---+----+----+----+----+
-      |        |    |    |    |
+     |        |    |    |    |
      RAG    Skill Sandbox Policy Budget
 ```
+
+API 与 Runtime Worker 之间必须通过 Celery 异步隔离。
+
+* PostgreSQL 是 Run / Session / Event / Checkpoint / Artifact / Audit 的事实存储。
+* Redis 是 Celery broker/result backend 以及可选短期事件流，不是长期事实存储。
+* Runtime Worker 负责执行 Run，不应运行在 API request handler 内。
 
 ---
 
@@ -92,25 +107,34 @@ Run Orchestrator 不负责：
 
 ### 3.2 Agent Runtime
 
-负责 Agent 的动态执行。
+负责将平台 Run 适配到 LangChain / DeepAgents 执行。
 
 核心能力：
 
-* Agent Loop
-* Context Management
-* Planning / Reasoning
-* Tool Calling
-* Memory
-* Skill
-* Sub-Agent
-* Agent Routing
-* Budget Control
-* Stop Control
-* HITL
-* Checkpoint
-* Recovery
+* DeepAgents / LangChain agent assembly
+* Middleware stack assembly
+* Platform tool -> LangChain tool adaptation
+* Platform sandbox/workspace -> DeepAgents backend adaptation
+* LangGraph checkpoint integration
+* Runtime Event mapping
+* Run output / artifact mapping
+* Failure / cancellation mapping
 
-Agent Runtime 必须依赖 Runtime Core 的统一对象和事件系统。
+Agent Runtime MUST NOT implement its own long-term Agent Loop, Decision Engine, Tool Executor, Context Manager, Memory Manager, Skill Manager, Sub-Agent Manager, or middleware mechanism.
+
+Agent execution belongs to:
+
+```text
+DeepAgents create_deep_agent()
+  ↓
+LangChain create_agent()
+  ↓
+LangGraph runtime
+```
+
+Platform-specific Policy, Budget, HITL, Observability, Memory, Skill, and Tool filtering should be implemented as LangChain / DeepAgents middleware.
+
+Agent Runtime 必须依赖 Runtime Core 的统一对象和事件系统，但不得将 LangChain / DeepAgents 类型泄漏到 Runtime Core。
 
 ---
 
@@ -216,17 +240,14 @@ Runtime 只依赖 Capability Interface。
 ```text
 Run
  |
- +-- Turn
+ +-- DeepAgentsRuntimeAdapter
       |
-      +-- Context Build
-      +-- LLM Call
-      +-- Decision
-      +-- Tool Call
-      +-- Tool Result
-      +-- State Update
-      +-- Checkpoint
-      |
-      +-- Next Turn
+      +-- create_deep_agent(...)
+      +-- middleware stack
+      +-- DeepAgents backend
+      +-- LangChain create_agent(...)
+      +-- LangGraph execution/checkpoint
+      +-- RuntimeEvent mapping
 ```
 
 ### Workflow
@@ -337,9 +358,13 @@ Runtime Core -> Agent Runtime
 Runtime Core -> Workflow Runtime
 Evaluation -> Agent Runtime
 Observability -> Agent Runtime
+API request handler -> direct Agent/Workflow execution
+Runtime Core -> LangChain / DeepAgents concrete types
 ```
 
 Observability 和 Evaluation 应通过 Event / Run Data 获取 Runtime 信息。
+
+Langfuse is the preferred V1 observability backend. Runtime code emits normalized events and traces; the Langfuse adapter consumes those events and must not become an execution dependency.
 
 ---
 

@@ -42,6 +42,20 @@ Observability Layer
 
 ---
 
+## 2.1 V1 Backend
+
+V1 preferred implementation:
+
+* Langfuse for LLM / agent / tool / workflow trace visualization
+* OpenTelemetry-compatible trace identifiers for correlation
+* RuntimeEvent as the platform-normalized durable event log
+
+Langfuse adapters consume Runtime events and LangChain / LangGraph callbacks.
+
+Runtime execution must continue to work if Langfuse is disabled or temporarily unavailable.
+
+---
+
 ## 3. Observability Dimensions
 
 ### Runtime
