@@ -8,7 +8,9 @@ workers. Request handlers import Runtime Core and dispatch wiring only
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from agent_platform.config import Settings
 from agent_platform.errors import NotFoundError
@@ -23,9 +25,17 @@ from agent_platform.runtime.core import (
     RunStatus,
     Session,
     SessionManager,
+    event_from_json,
+    event_to_json,
 )
 from agent_platform.runtime.dispatch.celery_app import create_celery_app, enqueue_resume, enqueue_run
 from agent_platform.runtime.dispatch.orchestrator import create_runtime_store
+from agent_platform.runtime.dispatch.redis_stream import (
+    RedisEventPublisher,
+    StreamBackend,
+    create_stream_backend,
+    is_terminal_event,
+)
 
 _VALID_RUNTIME_TYPES = {"agent", "workflow"}
 # RUNNING cancellation is cooperative (HITL/interrupt) and deferred; terminal
@@ -33,6 +43,10 @@ _VALID_RUNTIME_TYPES = {"agent", "workflow"}
 _CANCELLABLE_STATUSES = {RunStatus.CREATED, RunStatus.QUEUED}
 # Retry re-dispatches a run from scratch; resume continues it from a checkpoint.
 _RETRYABLE_STATUSES = {RunStatus.FAILED, RunStatus.CANCELLED}
+_TERMINAL_STATUSES = {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}
+# Emit an SSE keep-alive comment after this many consecutive empty reads
+# (1s blocking read each) so proxies do not close idle streams.
+_KEEP_ALIVE_IDLE_READS = 15
 
 
 class CreateRunRequest(BaseModel):
@@ -42,7 +56,9 @@ class CreateRunRequest(BaseModel):
     session_id: str | None = None
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None, *, stream_backend: StreamBackend | None = None
+) -> FastAPI:
     resolved_settings = settings or Settings()
     configure_logging(resolved_settings.log_level)
     app = FastAPI(title=resolved_settings.app_name, version=resolved_settings.version)
@@ -54,6 +70,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     celery = create_celery_app(
         resolved_settings.redis_url, eager=resolved_settings.celery_task_always_eager
     )
+    # Live event fanout (dispatch-spec section 6): in single-process mode the
+    # publisher below feeds the SSE endpoint directly; with redis_event_fanout
+    # enabled, workers publish to Redis and the API reads the same stream.
+    resolved_backend = stream_backend or create_stream_backend(resolved_settings)
+    events.subscribe(RedisEventPublisher(resolved_backend))
 
     @app.get("/api/v1/health")
     def health() -> dict[str, str]:
@@ -217,6 +238,60 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except NotFoundError:
             raise HTTPException(status_code=404, detail=f"run not found: {run_id}") from None
         return {"events": [_event_payload(event) for event in events.list_events(run_id)]}
+
+    @app.get("/api/v1/runs/{run_id}/events/stream")
+    def stream_run_events(run_id: str) -> StreamingResponse:
+        """SSE stream of one run's events (02-api-architecture.md section 4).
+
+        Replays the durable PostgreSQL log first, then follows live events
+        from the stream backend. Streams for terminal runs end after the
+        replay; live streams end once a terminal lifecycle event arrives.
+        """
+        try:
+            runs.get_run(run_id)
+        except NotFoundError:
+            raise HTTPException(status_code=404, detail=f"run not found: {run_id}") from None
+        return StreamingResponse(
+            _run_event_stream(run_id),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    async def _run_event_stream(run_id: str):
+        def frame(event: RuntimeEvent) -> str:
+            return (
+                f"event: {event.event_type.value}\n"
+                f"id: {event.id}\n"
+                f"data: {event_to_json(event)}\n\n"
+            )
+
+        seen: set[str] = set()
+        for event in events.list_events(run_id):
+            seen.add(event.id)
+            yield frame(event)
+
+        if runs.get_run(run_id).status in _TERMINAL_STATUSES:
+            return
+
+        cursor = "0-0"
+        idle_reads = 0
+        while True:
+            entries = await run_in_threadpool(resolved_backend.read, cursor, 1000, 100)
+            if not entries:
+                idle_reads += 1
+                if idle_reads % _KEEP_ALIVE_IDLE_READS == 0:
+                    yield ": keep-alive\n\n"
+                continue
+            idle_reads = 0
+            for entry_id, data in entries:
+                cursor = entry_id
+                event = event_from_json(data)
+                if event.run_id != run_id or event.id in seen:
+                    continue
+                seen.add(event.id)
+                yield frame(event)
+                if is_terminal_event(data):
+                    return
 
     return app
 

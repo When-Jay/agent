@@ -14,6 +14,10 @@ class Settings:
         default_factory=lambda: getenv("CELERY_TASK_ALWAYS_EAGER", "").strip().lower()
         in {"1", "true", "yes", "on"}
     )
+    redis_event_fanout_enabled: bool = field(
+        default_factory=lambda: getenv("REDIS_EVENT_FANOUT_ENABLED", "").strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
     langfuse_public_key: str = field(default_factory=lambda: getenv("LANGFUSE_PUBLIC_KEY", ""))
     langfuse_secret_key: str = field(default_factory=lambda: getenv("LANGFUSE_SECRET_KEY", ""))
     langfuse_host: str = field(

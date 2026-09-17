@@ -1,3 +1,4 @@
+import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -99,3 +100,28 @@ class EventBus:
                 callback(event)
             except Exception:
                 logger.warning("event subscriber failed for %s", event.event_type, exc_info=True)
+
+
+def event_to_json(event: RuntimeEvent) -> str:
+    """Serialize a RuntimeEvent to a JSON string (Redis payloads, SSE data)."""
+    return json.dumps(
+        {
+            "id": event.id,
+            "run_id": event.run_id,
+            "event_type": event.event_type.value,
+            "payload": event.payload,
+            "created_at": event.created_at.isoformat(),
+        }
+    )
+
+
+def event_from_json(data: str | bytes) -> RuntimeEvent:
+    """Rebuild a RuntimeEvent from JSON produced by event_to_json."""
+    raw = json.loads(data)
+    return RuntimeEvent(
+        id=raw["id"],
+        run_id=raw["run_id"],
+        event_type=RuntimeEventType(raw["event_type"]),
+        payload=raw.get("payload") or {},
+        created_at=datetime.fromisoformat(raw["created_at"]),
+    )
