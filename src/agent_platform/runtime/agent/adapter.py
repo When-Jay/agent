@@ -26,6 +26,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.types import Command
 
 from agent_platform.errors import InvalidStateTransitionError
+from agent_platform.runtime.agent.ask_user import AskUserMiddleware
 from agent_platform.runtime.agent.backend import PlatformSandboxBackend
 from agent_platform.runtime.agent.middleware import (
     BudgetExceededError,
@@ -276,6 +277,10 @@ class DeepAgentsRuntimeAdapter:
                 SteeringMiddleware(self._steering_channel, run_id, emit=emit)
             )
         middleware.append(BudgetMiddleware(budget, emit=emit))
+        # AskUser (budget-steering-spec.md sections 27/28): contributes the
+        # ask_user tool; a call interrupts the graph and the run parks in
+        # WAITING_FOR_HUMAN until POST /runs/{id}/respond resumes it.
+        middleware.append(AskUserMiddleware())
         middleware.extend(self._extra_middleware)
         # HITL policy (deepagents-runtime-spec section 5): {"tool": [decisions]}
         # pauses the run before that tool executes; the decision arrives via

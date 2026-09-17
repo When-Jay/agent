@@ -7,6 +7,7 @@ sandbox backend adaptation and RuntimeEvent mapping.
 """
 
 from agent_platform.runtime.agent.adapter import AgentRunResult, DeepAgentsRuntimeAdapter
+from agent_platform.runtime.agent.ask_user import AskUserMiddleware
 from agent_platform.runtime.agent.backend import PlatformSandboxBackend
 from agent_platform.runtime.agent.middleware import (
     BudgetExceededError,
@@ -20,6 +21,7 @@ from agent_platform.runtime.agent.tools import LangChainToolAdapter, ToolAdaptat
 
 __all__ = [
     "AgentRunResult",
+    "AskUserMiddleware",
     "BudgetExceededError",
     "BudgetMiddleware",
     "DeepAgentsRuntimeAdapter",

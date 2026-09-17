@@ -88,7 +88,9 @@ _checkpoints = Table(
 )
 _artifacts = Table(
     "artifacts", metadata,
-    Column("id", String(64), primary_key=True),
+    # seq keeps insertion order stable when created_at ties (same clock tick).
+    Column("seq", Integer, primary_key=True, autoincrement=True),
+    Column("id", String(64), nullable=False, unique=True),
     Column("run_id", String(64), nullable=False, index=True),
     Column("name", String(255), nullable=False),
     Column("uri", Text, nullable=False),
@@ -403,7 +405,7 @@ class SQLAlchemyRuntimeStore:
             rows = conn.execute(
                 select(_artifacts)
                 .where(_artifacts.c.run_id == run_id)
-                .order_by(_artifacts.c.created_at, _artifacts.c.id)
+                .order_by(_artifacts.c.created_at, _artifacts.c.seq)
             ).mappings().all()
         return [
             Artifact(

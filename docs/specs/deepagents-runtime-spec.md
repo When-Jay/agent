@@ -109,6 +109,9 @@ SkillMiddleware
 SteeringMiddleware          (budget-steering-spec.md: merges pending user
                              steering messages into one System Notice before
                              the next model call; consume-after-success)
+AskUserMiddleware           (budget-steering-spec.md sections 27/28: ask_user
+                             tool pauses the run on a LangGraph interrupt until
+                             the user answers via the respond API)
 ```
 
 Middleware may read platform configuration and write RuntimeEvents, but must not import API request handlers.

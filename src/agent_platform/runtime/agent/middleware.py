@@ -165,13 +165,12 @@ class SteeringMiddleware(AgentMiddleware):
         return result
 
 
+# Budget finishing notice text is fixed by budget-steering-spec.md section 15.
 BUDGET_FINISHING_NOTICE = (
-    "Execution budget is nearly exhausted.\n\n"
-    "Stop new discovery/verification work now.\n"
-    "Produce the required final deliverable (answer/JSON/summary) from the "
-    "state you already have, completing only mandatory writes.\n\n"
-    "Do not start new non-essential tool calls.\n"
-    "Prioritize completing the final response."
+    "[SYSTEM NOTICE — run time budget nearly exhausted] "
+    "Run time budget nearly exhausted. "
+    "Stop new discovery/verification work now. Produce the required final deliverable "
+    "(answer/JSON/summary) from the state you already have, completing only mandatory writes."
 )
 
 
@@ -208,7 +207,7 @@ class BudgetMiddleware(AgentMiddleware):
         if decision.entering_finishing and not self._notice_injected:
             self._notice_injected = True
             request = request.override(
-                messages=[*request.messages, runtime_notice("BUDGET", BUDGET_FINISHING_NOTICE)]
+                messages=[*request.messages, SystemMessage(content=BUDGET_FINISHING_NOTICE)]
             )
         result = await handler(request)
         message = _extract_ai_message(result)
@@ -262,8 +261,11 @@ class BudgetMiddleware(AgentMiddleware):
 class ToolPermissionMiddleware(AgentMiddleware):
     """Denies tool calls for tools outside the configured allowlist.
 
-    `None` means no restriction.
+    `None` means no restriction. Platform runtime-control tools (`ask_user`)
+    are always allowed: they are infrastructure, not user-configured tools.
     """
+
+    RUNTIME_CONTROL_TOOLS = frozenset({"ask_user"})
 
     def __init__(self, allowed_tools: list[str] | None = None) -> None:
         self._allowed = set(allowed_tools) if allowed_tools is not None else None
@@ -271,7 +273,7 @@ class ToolPermissionMiddleware(AgentMiddleware):
     async def awrap_tool_call(self, request: ToolCallRequest, handler) -> Any:
         if self._allowed is not None:
             tool_name = getattr(request.tool, "name", None) or request.tool_call.get("name")
-            if tool_name not in self._allowed:
+            if tool_name not in self._allowed and tool_name not in self.RUNTIME_CONTROL_TOOLS:
                 raise ToolPermissionDeniedError(f"tool not allowed: {tool_name}")
         return await handler(request)
 

@@ -1010,6 +1010,14 @@ AskUserMiddleware
 
 本次不要重新实现。
 
+> 实现备注（2026-09-17）：上游实现位于 deepagents-code CLI 发行包
+> （langchain-ai/deepagents `libs/code/deepagents_code/ask_user.py`），
+> 不适合作为服务端依赖引入。`runtime/agent/ask_user.py` 按相同公共
+> 接口与 interrupt payload 协议做了最小 vendor（去除 CLI 特有的
+> authorization receipt / turn-id 逻辑），并接入 DeepAgents Middleware
+> Stack。Resume payload 契约保持上游格式：
+> `{"status": "answered"|"cancelled"|"error", "answers": [...]}`。
+
 只需要：
 
 ```text

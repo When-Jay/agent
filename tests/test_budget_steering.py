@@ -15,14 +15,19 @@ from types import SimpleNamespace
 import pytest
 from langchain.agents.middleware.types import ModelRequest
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import Command
 
 from agent_platform.errors import PlatformError
+from agent_platform.runtime.agent import AskUserMiddleware
 from agent_platform.runtime.agent.adapter import DeepAgentsRuntimeAdapter
+from agent_platform.runtime.agent.ask_user import _parse_answers, _validate_questions
 from agent_platform.runtime.agent.middleware import (
     BudgetExceededError,
     BudgetMiddleware,
     SteeringMiddleware,
+    ToolPermissionMiddleware,
 )
 from agent_platform.runtime.capabilities.budget import (
     BudgetCapability,
@@ -236,7 +241,10 @@ def test_budget_middleware_injects_finishing_notice_once():
 
     asyncio.run(middleware.awrap_model_call(_make_request(), handler))
     assert len(seen_requests[0]) == 2
-    assert "[SYSTEM NOTICE — BUDGET]" in seen_requests[0][-1].content
+    assert seen_requests[0][-1].content.startswith(
+        "[SYSTEM NOTICE — run time budget nearly exhausted]"
+    )
+    assert "Produce the required final deliverable" in seen_requests[0][-1].content
     assert RuntimeEventType.BUDGET_FINISHING in [e for e, _ in events]
 
     # 第二次调用不再注入（consume once）
@@ -447,6 +455,117 @@ def test_adapter_budget_turn_limit_fails_run():
 
     assert result.status == "failed"
     assert "turns" in (result.error or "")
+
+
+# --- ask_user (spec sections 27/28/43) ---------------------------------------------
+
+
+def test_ask_user_middleware_provides_ask_user_tool():
+    middleware = AskUserMiddleware()
+    assert [t.name for t in middleware.tools] == ["ask_user"]
+
+
+def test_ask_user_question_validation():
+    with pytest.raises(ValueError):
+        _validate_questions([])
+    with pytest.raises(ValueError):
+        _validate_questions([{"question": "", "type": "text"}])
+    with pytest.raises(ValueError):
+        _validate_questions([{"question": "q", "type": "poll"}])
+    with pytest.raises(ValueError):
+        _validate_questions([{"question": "q", "type": "multiple_choice", "choices": []}])
+    with pytest.raises(ValueError):
+        _validate_questions([{"question": "q", "type": "text", "choices": ["a"]}])
+    _validate_questions([{"question": "q", "type": "text"}])  # 合法结构不抛
+
+
+def test_ask_user_parse_answers_contract():
+    """上游协议：{"status": "answered"|"cancelled"|"error", "answers": [...]}。"""
+    questions = [
+        {"question": "Which color?", "type": "text"},
+        {"question": "Size?", "type": "multiple_choice", "choices": ["S", "M"]},
+    ]
+    command = _parse_answers(
+        {"status": "answered", "answers": ["blue", "M"]}, questions, "call-1"
+    )
+    assert isinstance(command, Command)
+    message = command.update["messages"][0]
+    assert isinstance(message, ToolMessage)
+    assert message.tool_call_id == "call-1"
+    assert "Q: Which color?\nA: blue" in message.content
+    assert "Q: Size?\nA: M" in message.content
+
+    cancelled = _parse_answers({"status": "cancelled"}, questions, "call-2")
+    assert "(cancelled)" in cancelled.update["messages"][0].content
+
+    malformed = _parse_answers("oops", questions, "call-3")
+    assert "(error: invalid ask_user response payload)" in malformed.update["messages"][0].content
+
+
+def test_ask_user_tool_bypasses_tool_allowlist():
+    """ask_user 是平台运行时控制工具，不受用户 allowlist 限制。"""
+    middleware = ToolPermissionMiddleware(["add"])
+    request = SimpleNamespace(
+        tool=SimpleNamespace(name="ask_user"), tool_call={"name": "ask_user"}
+    )
+
+    async def handler(_request):
+        return "ok"
+
+    assert asyncio.run(middleware.awrap_tool_call(request, handler)) == "ok"
+
+
+def _ask_user_tool_call():
+    return AIMessage(
+        "",
+        tool_calls=[
+            {
+                "name": "ask_user",
+                "args": {"questions": [{"question": "Which color?", "type": "text"}]},
+                "id": "call-ask-1",
+                "type": "tool_call",
+            }
+        ],
+    )
+
+
+def test_agent_parks_on_ask_user_then_resumes_with_answer():
+    """spec section 43 链路：Agent → AskUser → interrupt → checkpoint →
+    user response → resume → Agent continue。"""
+    store, run_id = _store_with_run()
+    model = _FakeModel(
+        messages=iter([_ask_user_tool_call(), AIMessage("the user picked blue")])
+    )
+    adapter = DeepAgentsRuntimeAdapter(
+        store,
+        model_factory=lambda spec: model,
+        tool_capability=InMemoryToolCapability(),
+        checkpointer=MemorySaver(),
+    )
+
+    result = asyncio.run(adapter.run(run_id))
+
+    assert result.status == "waiting_for_human"
+    assert RunManager(store).get_run(run_id).status is RunStatus.WAITING_FOR_HUMAN
+    approvals = [
+        e
+        for e in EventBus(store).list_events(run_id)
+        if e.event_type is RuntimeEventType.APPROVAL_REQUIRED
+    ]
+    request = approvals[0].payload["request"]
+    assert request["type"] == "ask_user"
+    assert request["questions"][0]["question"] == "Which color?"
+    assert request["tool_call_id"] == "call-ask-1"
+
+    resumed = asyncio.run(
+        adapter.resume(run_id, response={"status": "answered", "answers": ["blue"]})
+    )
+
+    assert resumed.status == "completed"
+    assert "blue" in resumed.output["final"]
+    types = [e.event_type for e in EventBus(store).list_events(run_id)]
+    assert RuntimeEventType.HUMAN_RESPONSE_RECEIVED in types
+    assert types[-1] is RuntimeEventType.RUN_COMPLETED
 
 
 def test_budget_exceeded_error_is_platform_error():
