@@ -15,6 +15,7 @@ from starlette.concurrency import run_in_threadpool
 from agent_platform.config import Settings
 from agent_platform.errors import NotFoundError
 from agent_platform.logging import configure_logging
+from agent_platform.observability import get_metrics_collector
 from agent_platform.runtime.core import (
     Application,
     Artifact,
@@ -88,6 +89,13 @@ def create_app(
             "status": "ok",
             "version": resolved_settings.version,
         }
+
+    @app.get("/api/v1/metrics")
+    def get_metrics() -> dict[str, Any]:
+        """Runtime metrics aggregated from RuntimeEvents (04-observability-
+        architecture.md section 3). Process-local: reflects events published
+        on buses this process subscribed the collector to."""
+        return get_metrics_collector().snapshot()
 
     @app.post("/api/v1/runs", status_code=201)
     def create_run(request: CreateRunRequest) -> dict[str, Any]:

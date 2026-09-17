@@ -29,12 +29,15 @@ def set_orchestrator_builder(builder: Callable[[], object]) -> None:
 
 def _default_builder():
     from agent_platform.observability.langfuse_adapter import attach_langfuse_subscriber
+    from agent_platform.observability.metrics import attach_metrics_collector
     from agent_platform.runtime.dispatch.orchestrator import build_default_orchestrator
     from agent_platform.runtime.dispatch.redis_stream import RedisEventPublisher, RedisStreamBackend
 
     orchestrator = build_default_orchestrator(_settings)
     # Optional, non-blocking trace export (dispatch-spec section 7).
     attach_langfuse_subscriber(orchestrator.events, _settings)
+    # In-memory runtime metrics (04-observability-architecture.md section 3).
+    attach_metrics_collector(orchestrator.events)
     # Optional, non-blocking live fanout (dispatch-spec section 6).
     if _settings.redis_event_fanout_enabled:
         orchestrator.events.subscribe(RedisEventPublisher(RedisStreamBackend(_settings.redis_url)))
