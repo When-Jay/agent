@@ -117,6 +117,15 @@ class SessionManager:
             raise NotFoundError(f"application not found: {application_id}")
         return application
 
+    def update_application(
+        self, application_id: str, *, metadata: dict[str, Any]
+    ) -> Application:
+        """Replace an application's metadata (control-plane configuration)."""
+        application = self.get_application(application_id)
+        updated = replace(application, metadata=metadata)
+        self._store.save_application(updated)
+        return updated
+
     def create_session(
         self, *, application_id: str, metadata: dict[str, Any] | None = None
     ) -> Session:

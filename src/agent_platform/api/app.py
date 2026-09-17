@@ -19,6 +19,7 @@ from agent_platform.observability import get_metrics_collector
 from agent_platform.runtime.core import (
     Application,
     Artifact,
+    ArtifactStore,
     EventBus,
     Run,
     RuntimeEvent,
@@ -62,8 +63,40 @@ class RespondRunRequest(BaseModel):
     response: Any = None
 
 
+class CreateApplicationRequest(BaseModel):
+    name: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CreateSessionRequest(BaseModel):
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class WorkflowReferenceRequest(BaseModel):
+    """Workflow binding stored in application metadata.
+
+    The control plane stores the name@version reference only; graph
+    definitions live in the worker-side registry (dispatch spec section 3:
+    the API never imports Workflow execution modules).
+    """
+
+    name: str
+    version: str | None = None
+
+
+class RegisterArtifactRequest(BaseModel):
+    """Client-side artifact registration (reference, not blob upload)."""
+
+    name: str
+    uri: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 def create_app(
-    settings: Settings | None = None, *, stream_backend: StreamBackend | None = None
+    settings: Settings | None = None,
+    *,
+    stream_backend: StreamBackend | None = None,
+    tool_capability=None,
 ) -> FastAPI:
     resolved_settings = settings or Settings()
     configure_logging(resolved_settings.log_level)
@@ -73,6 +106,7 @@ def create_app(
     runs = RunManager(store)
     sessions = SessionManager(store)
     events = EventBus(store)
+    artifacts = ArtifactStore(store)
     celery = create_celery_app(
         resolved_settings.redis_url, eager=resolved_settings.celery_task_always_eager
     )
@@ -233,6 +267,92 @@ def create_app(
             ]
         }
 
+    @app.post("/api/v1/applications", status_code=201)
+    def create_application(request: CreateApplicationRequest) -> dict[str, Any]:
+        if not request.name.strip():
+            raise HTTPException(status_code=422, detail="name must not be empty")
+        application = sessions.create_application(
+            name=request.name, metadata=request.metadata
+        )
+        return _application_payload(application)
+
+    @app.post(
+        "/api/v1/applications/{application_id}/sessions", status_code=201
+    )
+    def create_application_session(
+        application_id: str, request: CreateSessionRequest
+    ) -> dict[str, Any]:
+        try:
+            session = sessions.create_session(
+                application_id=application_id, metadata=request.metadata
+            )
+        except NotFoundError:
+            raise HTTPException(
+                status_code=404, detail=f"application not found: {application_id}"
+            ) from None
+        return _session_payload(session)
+
+    @app.get("/api/v1/applications/{application_id}/workflow")
+    def get_application_workflow(application_id: str) -> dict[str, Any]:
+        try:
+            application = sessions.get_application(application_id)
+        except NotFoundError:
+            raise HTTPException(
+                status_code=404, detail=f"application not found: {application_id}"
+            ) from None
+        workflow = (application.metadata or {}).get("workflow")
+        if not workflow:
+            raise HTTPException(
+                status_code=404,
+                detail=f"application {application_id} has no workflow binding",
+            ) from None
+        return {"workflow": dict(workflow)}
+
+    @app.put("/api/v1/applications/{application_id}/workflow")
+    def put_application_workflow(
+        application_id: str, request: WorkflowReferenceRequest
+    ) -> dict[str, Any]:
+        """Bind the application to a workflow name@version (section 3 routing).
+
+        Validation is structural only: the graph itself is resolved by the
+        worker's registry at dispatch time.
+        """
+        name = request.name.strip()
+        if not name:
+            raise HTTPException(status_code=422, detail="name must not be empty")
+        if request.version is not None and not request.version.strip():
+            raise HTTPException(status_code=422, detail="version must not be empty")
+        version = request.version.strip() if request.version is not None else None
+        try:
+            application = sessions.get_application(application_id)
+        except NotFoundError:
+            raise HTTPException(
+                status_code=404, detail=f"application not found: {application_id}"
+            ) from None
+        metadata = dict(application.metadata or {})
+        metadata["workflow"] = {"name": name, "version": version}
+        sessions.update_application(application_id, metadata=metadata)
+        return {"workflow": metadata["workflow"]}
+
+    @app.get("/api/v1/tools")
+    def list_tools() -> dict[str, Any]:
+        """Registered tools (runtime-capabilities-spec section Tool).
+
+        Uses the capability injected at composition time; the API layer
+        never constructs tool handlers itself.
+        """
+        specs = tool_capability.list_tools() if tool_capability is not None else []
+        return {
+            "tools": [
+                {
+                    "name": spec.name,
+                    "description": spec.description,
+                    "parameters": spec.parameters,
+                }
+                for spec in specs
+            ]
+        }
+
     @app.get("/api/v1/applications/{application_id}")
     def get_application(application_id: str) -> dict[str, Any]:
         try:
@@ -269,6 +389,29 @@ def create_app(
         except NotFoundError:
             raise HTTPException(status_code=404, detail=f"run not found: {run_id}") from None
         return {"artifacts": [_artifact_payload(a) for a in store.list_artifacts_for_run(run_id)]}
+
+    @app.post("/api/v1/runs/{run_id}/artifacts", status_code=201)
+    def register_run_artifact(run_id: str, request: RegisterArtifactRequest) -> dict[str, Any]:
+        """Register an artifact reference produced outside the platform.
+
+        The URI is stored as-is (s3://, file://, https://, ...); content
+        upload/proxying is out of V1 scope (runtime-spec section 10).
+        """
+        try:
+            runs.get_run(run_id)
+        except NotFoundError:
+            raise HTTPException(status_code=404, detail=f"run not found: {run_id}") from None
+        if not request.name.strip():
+            raise HTTPException(status_code=422, detail="name must not be empty")
+        if not request.uri.strip():
+            raise HTTPException(status_code=422, detail="uri must not be empty")
+        artifact = artifacts.create(
+            run_id=run_id,
+            name=request.name.strip(),
+            uri=request.uri.strip(),
+            metadata=request.metadata,
+        )
+        return _artifact_payload(artifact)
 
     @app.get("/api/v1/artifacts/{artifact_id}")
     def get_artifact(artifact_id: str) -> dict[str, Any]:

@@ -130,14 +130,21 @@ class SQLAlchemyRuntimeStore:
     # -- applications / sessions ---------------------------------------------
 
     def save_application(self, application: Application) -> None:
+        values = {
+            "id": application.id,
+            "name": application.name,
+            "metadata": application.metadata,  # noqa: A003 - column name
+        }
         with self.engine.begin() as conn:
-            conn.execute(
-                insert(_applications).values(
-                    id=application.id,
-                    name=application.name,
-                    metadata=application.metadata,  # noqa: A003 - column name
+            existing = conn.execute(
+                select(_applications.c.id).where(_applications.c.id == application.id)
+            ).first()
+            if existing:
+                conn.execute(
+                    _applications.update().where(_applications.c.id == application.id).values(**values)
                 )
-            )
+            else:
+                conn.execute(insert(_applications).values(**values))
 
     def get_application(self, application_id: str) -> Application | None:
         with self.engine.connect() as conn:

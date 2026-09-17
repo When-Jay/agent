@@ -85,10 +85,10 @@ def _flaky_runner(store) -> WorkflowRunner:
     return WorkflowRunner(store, registry=registry)
 
 
-def _client(tmp_path):
+def _client(tmp_path, **kwargs):
     database_url = f"sqlite:///{tmp_path / 'api.db'}"
     settings = Settings(database_url=database_url, celery_task_always_eager=True)
-    return TestClient(create_app(settings)), create_runtime_store(database_url)
+    return TestClient(create_app(settings, **kwargs)), create_runtime_store(database_url)
 
 
 def _seed_run(store, *, runtime_type="agent", status=RunStatus.QUEUED):
@@ -371,3 +371,119 @@ def test_resume_rejects_invalid_requests(tmp_path):
 
     assert client.post(f"/api/v1/runs/{workflow_run.id}/resume").status_code == 409
     assert client.post(f"/api/v1/runs/{uuid4()}/resume").status_code == 404
+
+
+# --- CRUD: applications, sessions, workflow binding, tools, artifacts --------
+
+
+def test_create_application_and_session(tmp_path):
+    client, store = _client(tmp_path)
+
+    created = client.post(
+        "/api/v1/applications",
+        json={"name": "support-bot", "metadata": {"team": "platform"}},
+    )
+    session = client.post(
+        f"/api/v1/applications/{created.json()['id']}/sessions", json={"metadata": {"lang": "zh"}}
+    )
+
+    assert created.status_code == 201
+    assert created.json()["name"] == "support-bot"
+    assert created.json()["metadata"] == {"team": "platform"}
+    assert session.status_code == 201
+    assert session.json()["application_id"] == created.json()["id"]
+    assert SessionManager(store).get_session(session.json()["id"]) is not None
+
+    assert client.post("/api/v1/applications", json={"name": "  "}).status_code == 422
+    assert (
+        client.post(f"/api/v1/applications/{uuid4()}/sessions", json={}).status_code == 404
+    )
+
+
+def test_workflow_binding_get_put_and_validation(tmp_path):
+    client, _ = _client(tmp_path)
+
+    created = client.post("/api/v1/applications", json={"name": "flow"})
+    app_id = created.json()["id"]
+
+    missing = client.get(f"/api/v1/applications/{app_id}/workflow")
+    assert missing.status_code == 404
+
+    bound = client.put(
+        f"/api/v1/applications/{app_id}/workflow", json={"name": "approval", "version": "1"}
+    )
+    assert bound.status_code == 200
+    assert bound.json() == {"workflow": {"name": "approval", "version": "1"}}
+
+    fetched = client.get(f"/api/v1/applications/{app_id}/workflow")
+    assert fetched.status_code == 200
+    assert fetched.json()["workflow"] == {"name": "approval", "version": "1"}
+
+    # Version is optional.
+    client.post("/api/v1/applications", json={"name": "multi"})
+    other = client.get("/api/v1/applications").json()["applications"][-1]["id"]
+    merged = client.put(f"/api/v1/applications/{other}/workflow", json={"name": "router"})
+    assert merged.json() == {"workflow": {"name": "router", "version": None}}
+
+    assert (
+        client.put(f"/api/v1/applications/{app_id}/workflow", json={"name": " "}).status_code
+        == 422
+    )
+    assert (
+        client.put(
+            f"/api/v1/applications/{app_id}/workflow", json={"name": "x", "version": " "}
+        ).status_code
+        == 422
+    )
+    assert (
+        client.put(f"/api/v1/applications/{uuid4()}/workflow", json={"name": "x"}).status_code
+        == 404
+    )
+
+
+def test_list_tools_with_and_without_capability(tmp_path):
+    from agent_platform.runtime.capabilities.tool import ToolSpec
+    from agent_platform.runtime.capabilities.tool_capability import InMemoryToolCapability
+
+    client, _ = _client(tmp_path)
+    assert client.get("/api/v1/tools").json() == {"tools": []}
+
+    capability = InMemoryToolCapability()
+    capability.register(
+        ToolSpec(
+            name="search",
+            description="Search the web",
+            parameters={"type": "object", "properties": {}},
+        ),
+        lambda arguments: "ok",
+    )
+    with_capability, _ = _client(tmp_path, tool_capability=capability)
+    body = with_capability.get("/api/v1/tools").json()
+    assert body["tools"] == [
+        {"name": "search", "description": "Search the web", "parameters": {"type": "object", "properties": {}}}
+    ]
+
+
+def test_register_run_artifact_reference(tmp_path):
+    client, store = _client(tmp_path)
+    _, _, run = _seed_run(store)
+
+    registered = client.post(
+        f"/api/v1/runs/{run.id}/artifacts",
+        json={"name": "report", "uri": "s3://bucket/report.pdf", "metadata": {"pages": 3}},
+    )
+    assert registered.status_code == 201
+    artifact_id = registered.json()["id"]
+    assert registered.json()["run_id"] == run.id
+    assert registered.json()["uri"] == "s3://bucket/report.pdf"
+
+    fetched = client.get(f"/api/v1/artifacts/{artifact_id}")
+    assert fetched.status_code == 200
+    assert fetched.json()["name"] == "report"
+
+    listed = client.get(f"/api/v1/runs/{run.id}/artifacts").json()["artifacts"]
+    assert [a["id"] for a in listed] == [artifact_id]
+
+    assert client.post(f"/api/v1/runs/{uuid4()}/artifacts", json={"name": "x", "uri": "u"}).status_code == 404
+    assert client.post(f"/api/v1/runs/{run.id}/artifacts", json={"name": " ", "uri": "u"}).status_code == 422
+    assert client.post(f"/api/v1/runs/{run.id}/artifacts", json={"name": "x", "uri": ""}).status_code == 422
