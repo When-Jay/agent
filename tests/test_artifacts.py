@@ -28,7 +28,12 @@ from agent_platform.runtime.core import (
 from agent_platform.runtime.capabilities.tool_capability import InMemoryToolCapability
 from agent_platform.runtime.dispatch import create_runtime_store
 from agent_platform.sandbox.manager import SandboxManager
-from agent_platform.sandbox.models import FileUploadResult, SandboxSpec, WorkspaceMount
+from agent_platform.sandbox.models import (
+    ExecutionResult,
+    FileUploadResult,
+    SandboxSpec,
+    WorkspaceMount,
+)
 from agent_platform.sandbox.registry import SandboxProviderRegistry
 
 from test_agent_runtime import _FakeModel
@@ -113,7 +118,7 @@ class _DeniedUploadProvider(FakeSandboxProvider):
 
 def _backend(store, provider=FakeSandboxProvider, *, artifacts=True, run_id="run-1"):
     registry = SandboxProviderRegistry()
-    registry.register("fake", provider())
+    registry.register("fake", provider() if isinstance(provider, type) else provider)
     manager = SandboxManager(registry, default_provider="fake")
     spec = SandboxSpec(
         image="fake:latest",
@@ -163,6 +168,67 @@ def test_backend_without_artifact_store_still_uploads():
 
     assert uploads[0].error is None
     assert store.list_artifacts_for_run("run-1") == []
+
+
+# --- truncated execution output ----------------------------------------------------
+
+
+class _TruncatedExecuteProvider(FakeSandboxProvider):
+    """Provider whose execute always reports a truncated large output."""
+
+    def __init__(self, stdout: str) -> None:
+        super().__init__()
+        self._stdout = stdout
+
+    async def execute(self, sandbox, request):  # noqa: ANN001, ANN202
+        self.executions.append(request)
+        return ExecutionResult(
+            request_id=request.request_id,
+            exit_code=0,
+            stdout=self._stdout,
+            stderr="",
+            duration_ms=1,
+            truncated=True,
+        )
+
+
+def test_backend_truncated_execute_persists_full_output_as_artifact():
+    store = InMemoryRuntimeStore()
+    provider = _TruncatedExecuteProvider("x" * 10)
+    backend = _backend(store, provider)
+
+    response = asyncio.run(backend.execute("generate-big-output"))
+
+    assert response.truncated is True
+    registered = ArtifactStore(store).list_for_run("run-1")
+    assert len(registered) == 1
+    path = f".platform/outputs/{provider.executions[0].request_id}.txt"
+    assert registered[0].name == path
+    assert registered[0].uri == f"sandbox://{backend.id}/{path}"
+    assert registered[0].metadata["exit_code"] == 0
+    assert registered[0].metadata["size"] == 10
+    # The full output is retrievable from the sandbox output area.
+    downloads = asyncio.run(backend.download_files([path]))
+    assert downloads[0].content == b"x" * 10
+
+
+def test_backend_normal_execute_registers_no_artifact():
+    store = InMemoryRuntimeStore()
+    backend = _backend(store)
+
+    asyncio.run(backend.execute("echo hi"))
+
+    assert store.list_artifacts_for_run("run-1") == []
+
+
+def test_backend_truncated_execute_without_artifact_store_still_executes():
+    provider = _TruncatedExecuteProvider("big output")
+    backend = _backend(InMemoryRuntimeStore(), provider, artifacts=False)
+
+    response = asyncio.run(backend.execute("generate-big-output"))
+
+    assert response.truncated is True
+    assert provider.files == {}  # nothing persisted without a run binding
 
 
 def test_adapter_wires_artifact_store_into_backend(monkeypatch):

@@ -83,10 +83,40 @@ class PlatformSandboxBackend(BaseSandbox):
         output = result.stdout
         if result.stderr:
             output = f"{output}\n{result.stderr}" if output else result.stderr
+        if result.truncated:
+            await self._persist_large_output(result, output)
         return ExecuteResponse(
             output=output,
             exit_code=result.exit_code,
             truncated=result.truncated,
+        )
+
+    async def _persist_large_output(self, result, output: str) -> None:
+        """Truncated output -> Artifact (sandbox-spec section 6).
+
+        The inline response stays truncated; the full output is written
+        into the sandbox's output area and registered as an Artifact with
+        a sandbox:// URI. A failed upload produces no Artifact. Skipped
+        entirely when no artifact store/run is wired in.
+        """
+        if self._artifacts is None or self._run_id is None:
+            return
+        path = f".platform/outputs/{result.request_id}.txt"
+        [upload] = await self._manager.upload(
+            self._sandbox_id, [FileUpload(path=path, content=output.encode("utf-8"))]
+        )
+        if upload.error is not None:
+            return
+        self._artifacts.create(
+            run_id=self._run_id,
+            name=path,
+            uri=f"sandbox://{self._sandbox_id}/{path}",
+            metadata={
+                "sandbox_id": self._sandbox_id,
+                "request_id": result.request_id,
+                "exit_code": result.exit_code,
+                "size": len(output.encode("utf-8")),
+            },
         )
 
     def _register_artifacts(
