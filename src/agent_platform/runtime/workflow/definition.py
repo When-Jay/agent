@@ -17,14 +17,17 @@ class NodeSpec:
     """One executable workflow node.
 
     handler receives the shared state dict and returns a partial state
-    update (None means no update). Node types (LLM/Tool/Agent/...) are
-    expressed as handlers; dedicated node kinds remain reserved.
+    update (None means no update). node_type selects the execution
+    flavor: "code" runs the handler directly; "human" uses the handler
+    to build the human-input request payload and pauses the run until a
+    response arrives (workflow-runtime-spec.md section 4).
     """
 
     name: str
     handler: NodeHandler
     retries: int = 0
     timeout_seconds: float | None = None
+    node_type: str = "code"  # "code" | "human"
 
 
 @dataclass(frozen=True)
@@ -68,6 +71,9 @@ class WorkflowDefinition:
         names = [node.name for node in self.nodes]
         if len(names) != len(set(names)):
             raise WorkflowDefinitionError("duplicate node names in workflow definition")
+        for node in self.nodes:
+            if node.node_type not in {"code", "human"}:
+                raise WorkflowDefinitionError(f"unknown node_type on {node.name}: {node.node_type}")
         if not self.nodes:
             raise WorkflowDefinitionError("workflow definition requires at least one node")
         node_set = set(names)

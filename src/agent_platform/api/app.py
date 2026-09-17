@@ -56,6 +56,10 @@ class CreateRunRequest(BaseModel):
     session_id: str | None = None
 
 
+class RespondRunRequest(BaseModel):
+    response: Any = None
+
+
 def create_app(
     settings: Settings | None = None, *, stream_backend: StreamBackend | None = None
 ) -> FastAPI:
@@ -179,6 +183,21 @@ def create_app(
                 ),
             )
         enqueue_resume(celery, run_id)
+        return _run_payload(runs.get_run(run_id))
+
+    @app.post("/api/v1/runs/{run_id}/respond")
+    def respond_run(run_id: str, request: RespondRunRequest) -> dict[str, Any]:
+        """Deliver a human response to a run paused on a Human node."""
+        try:
+            run = runs.get_run(run_id)
+        except NotFoundError:
+            raise HTTPException(status_code=404, detail=f"run not found: {run_id}") from None
+        if run.status is not RunStatus.WAITING_FOR_HUMAN:
+            raise HTTPException(
+                status_code=409,
+                detail=f"run {run_id} is not waiting for human input (status {run.status.value})",
+            )
+        enqueue_resume(celery, run_id, response=request.response)
         return _run_payload(runs.get_run(run_id))
 
     @app.get("/api/v1/runs")

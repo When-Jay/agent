@@ -19,6 +19,7 @@ class RuntimeEventType(str, Enum):
     # Run lifecycle
     RUN_STARTED = "RunStarted"
     RUN_RESUMED = "RunResumed"
+    RUN_PAUSED = "RunPaused"
     RUN_COMPLETED = "RunCompleted"
     RUN_FAILED = "RunFailed"
     RUN_CANCELLED = "RunCancelled"
@@ -46,8 +47,12 @@ class RuntimeEventType(str, Enum):
     # Persistence
     CHECKPOINT_CREATED = "CheckpointCreated"
 
+    # Human interaction
+    APPROVAL_REQUIRED = "ApprovalRequired"
+    HUMAN_RESPONSE_RECEIVED = "HumanResponseReceived"
+
     # Reserved (see runtime-spec.md section 8):
-    # RunPaused, ApprovalRequired, UserInputRequired, HumanResponseReceived.
+    # UserInputRequired.
 
 
 @dataclass(frozen=True)

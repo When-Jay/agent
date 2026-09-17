@@ -20,7 +20,7 @@ from agent_platform.runtime.core import (
     StateManager,
 )
 from agent_platform.runtime.workflow.definition import WorkflowDefinition
-from agent_platform.runtime.workflow.engine import Superstep, WorkflowEngine
+from agent_platform.runtime.workflow.engine import INTERRUPTED_KEY, Superstep, WorkflowEngine
 from agent_platform.runtime.workflow.langgraph_engine import LangGraphWorkflowEngine
 from agent_platform.runtime.workflow.nodes import NodeExecutor, WorkflowNodeError
 from agent_platform.runtime.workflow.registry import WorkflowRegistry
@@ -28,7 +28,7 @@ from agent_platform.runtime.workflow.registry import WorkflowRegistry
 
 @dataclass(frozen=True)
 class WorkflowRunResult:
-    status: str  # "completed" | "failed"
+    status: str  # "completed" | "failed" | "waiting_for_human"
     state: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
 
@@ -82,18 +82,37 @@ class WorkflowRunner:
         )
         return self._consume(run_id, stream, state)
 
-    def resume(self, *, run_id: str, definition: WorkflowDefinition) -> WorkflowRunResult:
+    def resume(
+        self,
+        *,
+        run_id: str,
+        definition: WorkflowDefinition,
+        response: Any = None,
+    ) -> WorkflowRunResult:
         run = self._runs.get_run(run_id)
-        if run.status not in {RunStatus.RUNNING, RunStatus.FAILED}:
+        if run.status not in {RunStatus.RUNNING, RunStatus.FAILED, RunStatus.WAITING_FOR_HUMAN}:
             raise InvalidStateTransitionError(f"cannot resume run from {run.status.value}")
         state = self._load_state(run_id)
         self._ensure_same_workflow(state, definition)
-        if run.status is RunStatus.FAILED:
+        waiting = run.status is RunStatus.WAITING_FOR_HUMAN
+        if waiting and response is None:
+            raise InvalidStateTransitionError(
+                f"run {run_id} waits for human input; a response is required to resume"
+            )
+        if run.status is not RunStatus.RUNNING:
             self._runs.restart_run(run_id)
+        if waiting:
+            self._publish(
+                run_id,
+                RuntimeEventType.HUMAN_RESPONSE_RECEIVED,
+                {"node": state.get("waiting_node"), "response": response},
+            )
+            self._publish(run_id, RuntimeEventType.RUN_RESUMED, {"reason": "human_response"})
         stream = self._engine.resume(
             definition=definition,
             run_id=run_id,
             node_executor=self._node_executor(run_id),
+            response=response if waiting else None,
         )
         return self._consume(run_id, stream, state)
 
@@ -102,6 +121,8 @@ class WorkflowRunner:
     def _consume(self, run_id: str, stream: Iterator[Superstep], state: dict[str, Any]) -> WorkflowRunResult:
         try:
             for superstep in stream:
+                if INTERRUPTED_KEY in superstep:
+                    return self._pause(run_id, state, superstep[INTERRUPTED_KEY])
                 for _node_name, update in superstep.items():
                     if update:
                         state["values"].update(update)
@@ -124,6 +145,25 @@ class WorkflowRunner:
         self._publish(run_id, RuntimeEventType.RUN_COMPLETED, {"output": dict(state["values"])})
         self._engine.drop(run_id)
         return WorkflowRunResult(status="completed", state=dict(state["values"]))
+
+    def _pause(self, run_id: str, state: dict[str, Any], interrupted: Any) -> WorkflowRunResult:
+        """Suspend the run on human input (waiting_for_human + HITL events)."""
+        info = interrupted if isinstance(interrupted, dict) else {}
+        node_name = info.get("node")
+        request = info.get("request")
+        state["status"] = "waiting_for_human"
+        state["waiting_node"] = node_name
+        self._persist(run_id, state)
+        self._runs.pause_run(run_id)
+        self._publish(run_id, RuntimeEventType.RUN_PAUSED, {"node": node_name})
+        self._publish(
+            run_id,
+            RuntimeEventType.APPROVAL_REQUIRED,
+            {"node": node_name, "request": request},
+        )
+        return WorkflowRunResult(
+            status="waiting_for_human", state=dict(state["values"]), error=None
+        )
 
     def _initial_state(self, definition: WorkflowDefinition, input: dict[str, Any] | None) -> dict[str, Any]:
         return {

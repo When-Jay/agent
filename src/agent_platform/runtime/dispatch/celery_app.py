@@ -5,6 +5,8 @@ execution modules. Eager mode (tests / local dev) executes in-process
 via `Task.apply`, which does not require a broker.
 """
 
+from typing import Any
+
 from celery import Celery
 
 TASK_NAME = "agent_platform.runtime.dispatch.execute_run"
@@ -37,11 +39,14 @@ def enqueue_run(app: Celery, run_id: str) -> None:
     app.send_task(TASK_NAME, args=[run_id])
 
 
-def enqueue_resume(app: Celery, run_id: str) -> None:
-    """Dispatch one Run for worker-side resume (same contract as enqueue_run)."""
+def enqueue_resume(app: Celery, run_id: str, response: Any = None) -> None:
+    """Dispatch one Run for worker-side resume (same contract as enqueue_run).
+
+    response carries the human response for runs paused on a Human node.
+    """
     if app.conf.task_always_eager:
         from agent_platform.runtime.dispatch import tasks
 
-        tasks.resume_run.apply(args=[run_id])
+        tasks.resume_run.apply(args=[run_id, response])
         return
-    app.send_task(RESUME_TASK_NAME, args=[run_id])
+    app.send_task(RESUME_TASK_NAME, args=[run_id, response])

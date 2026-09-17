@@ -8,6 +8,7 @@ deployments override composition without touching the task contract.
 
 import logging
 from collections.abc import Callable
+from typing import Any
 
 from agent_platform.config import Settings
 from agent_platform.runtime.dispatch.celery_app import RESUME_TASK_NAME, TASK_NAME, create_celery_app
@@ -49,8 +50,8 @@ def execute_run(run_id: str) -> str:
 
 
 @celery_app.task(name=RESUME_TASK_NAME)
-def resume_run(run_id: str) -> str:
+def resume_run(run_id: str, response: Any = None) -> str:
     builder = _orchestrator_builder or _default_builder
     orchestrator = builder()
-    orchestrator.resume(run_id)
+    orchestrator.resume(run_id, response=response)
     return run_id

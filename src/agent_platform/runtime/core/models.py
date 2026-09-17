@@ -8,6 +8,7 @@ class RunStatus(str, Enum):
     QUEUED = "queued"  # dispatch: created by API, waiting for a runtime worker
     CREATED = "created"  # created outside dispatch (direct/test usage)
     RUNNING = "running"
+    WAITING_FOR_HUMAN = "waiting_for_human"  # paused on a Human node (dispatch-spec section 5)
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"

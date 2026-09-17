@@ -11,10 +11,11 @@ from typing import Annotated, Any, TypedDict
 
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command, interrupt
 
 from agent_platform.errors import NotFoundError
 from agent_platform.runtime.workflow.definition import WorkflowDefinition
-from agent_platform.runtime.workflow.engine import Superstep, WorkflowEngine
+from agent_platform.runtime.workflow.engine import INTERRUPTED_KEY, Superstep, WorkflowEngine
 from agent_platform.runtime.workflow.nodes import NodeExecutor
 
 
@@ -51,9 +52,11 @@ class LangGraphWorkflowEngine(WorkflowEngine):
         definition: WorkflowDefinition,
         run_id: str,
         node_executor: NodeExecutor,
+        response: Any = None,
     ) -> Iterator[Superstep]:
         compiled, config = self._compile(definition, node_executor, run_id)
-        return self._stream(compiled, config, None)
+        input_state = None if response is None else Command(resume=response)
+        return self._stream(compiled, config, input_state)
 
     def _compile(
         self,
@@ -109,12 +112,19 @@ class LangGraphWorkflowEngine(WorkflowEngine):
 
     def _wrap(self, node, node_executor: NodeExecutor):
         def _run(state: dict) -> dict:
-            update = node_executor.execute(node, state.get("values", {}))
+            values = state.get("values", {})
+            if node.node_type == "human":
+                request = node_executor.request_human_input(node, values)
+                # Pauses the graph; on resume the node replays and this
+                # returns the supplied human response.
+                decision = interrupt(request)
+                return {"values": node_executor.apply_human_response(node, decision)}
+            update = node_executor.execute(node, values)
             return {"values": update} if update else {}
 
         return _run
 
-    def _stream(self, compiled: Any, config: dict[str, Any], input_state: dict | None) -> Iterator[Superstep]:
+    def _stream(self, compiled: Any, config: dict[str, Any], input_state: dict | Any) -> Iterator[Superstep]:
         for chunk in compiled.stream(input_state, config, stream_mode="updates"):
             superstep: Superstep = {}
             for node_name, update in chunk.items():
@@ -124,6 +134,16 @@ class LangGraphWorkflowEngine(WorkflowEngine):
                 superstep[node_name] = dict(values) if values else None
             if superstep:
                 yield superstep
+
+        # The stream ends after an interrupt; surface the pause to the
+        # runner together with the pending node and request payload.
+        snapshot = compiled.get_state(config)
+        if snapshot.next:
+            node_name = snapshot.next[0]
+            request = next(
+                (task.interrupts[0].value for task in snapshot.tasks if task.interrupts), None
+            )
+            yield {INTERRUPTED_KEY: {"node": node_name, "request": request}}
 
     def drop(self, run_id: str) -> None:
         """Release in-process engine state for a run."""

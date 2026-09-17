@@ -16,6 +16,10 @@ from agent_platform.runtime.workflow.nodes import NodeExecutor
 # same superstep appear together. None update means the node wrote nothing.
 Superstep = dict[str, dict[str, Any] | None]
 
+# Sentinel key a yielding engine uses to signal that the graph paused on
+# human input (LangGraph interrupt). The value is {"node", "request"}.
+INTERRUPTED_KEY = "__interrupted__"
+
 
 class WorkflowEngine(ABC):
     @abstractmethod
@@ -36,5 +40,10 @@ class WorkflowEngine(ABC):
         definition: WorkflowDefinition,
         run_id: str,
         node_executor: NodeExecutor,
+        response: Any = None,
     ) -> Iterator[Superstep]:
-        """Continue an interrupted execution from the engine checkpoint."""
+        """Continue an interrupted execution from the engine checkpoint.
+
+        response is the human response for a run paused on a "human"
+        node; None resumes a failed execution without new input.
+        """

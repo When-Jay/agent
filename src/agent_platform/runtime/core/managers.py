@@ -56,14 +56,26 @@ class RunManager:
 
     def cancel_run(self, run_id: str) -> Run:
         run = self._get_run(run_id)
-        if run.status not in {RunStatus.QUEUED, RunStatus.CREATED, RunStatus.RUNNING}:
+        if run.status not in {
+            RunStatus.QUEUED,
+            RunStatus.CREATED,
+            RunStatus.RUNNING,
+            RunStatus.WAITING_FOR_HUMAN,
+        }:
             raise InvalidStateTransitionError(f"cannot cancel run from {run.status.value}")
         return self._save(replace(run, status=RunStatus.CANCELLED, completed_at=_now()))
 
-    def restart_run(self, run_id: str) -> Run:
-        """Recovery transition: move a failed run back to RUNNING for resume."""
+    def pause_run(self, run_id: str) -> Run:
+        """HITL transition: suspend a running run on a Human node."""
         run = self._get_run(run_id)
-        if run.status is not RunStatus.FAILED:
+        if run.status is not RunStatus.RUNNING:
+            raise InvalidStateTransitionError(f"cannot pause run from {run.status.value}")
+        return self._save(replace(run, status=RunStatus.WAITING_FOR_HUMAN))
+
+    def restart_run(self, run_id: str) -> Run:
+        """Recovery transition: move a failed or waiting run back to RUNNING."""
+        run = self._get_run(run_id)
+        if run.status not in {RunStatus.FAILED, RunStatus.WAITING_FOR_HUMAN}:
             raise InvalidStateTransitionError(f"cannot restart run from {run.status.value}")
         return self._save(replace(run, status=RunStatus.RUNNING, error=None))
 

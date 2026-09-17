@@ -26,7 +26,9 @@ from agent_platform.runtime.core import (
 
 logger = logging.getLogger(__name__)
 
-_TERMINAL_STATUSES = {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}
+# Runs the orchestrator may start executing; everything else (terminal,
+# RUNNING, WAITING_FOR_HUMAN) is skipped so worker retries stay idempotent.
+_EXECUTABLE_STATUSES = {RunStatus.CREATED, RunStatus.QUEUED}
 
 # In-memory stores are process-wide singletons so the eager worker path
 # (tests, local dev) shares durable state with the API in the same process.
@@ -70,11 +72,12 @@ class RuntimeOrchestrator:
 
     def execute(self, run_id: str) -> None:
         run = self._runs.get_run(run_id)
-        if run.status in _TERMINAL_STATUSES:
+        # Only fresh runs execute; terminal runs are skipped (worker
+        # retries must be idempotent), WAITING_FOR_HUMAN runs must not be
+        # re-executed behind the caller's back.
+        if run.status not in _EXECUTABLE_STATUSES:
             logger.info(
-                "run %s already terminal (%s); skipping re-execution",
-                run_id,
-                run.status.value,
+                "run %s not executable from %s; skipping", run_id, run.status.value
             )
             return
         if run.runtime_type == "agent":
@@ -84,21 +87,32 @@ class RuntimeOrchestrator:
         else:
             self._fail(run_id, f"unknown runtime_type: {run.runtime_type}")
 
-    def resume(self, run_id: str) -> None:
-        """Resume a failed Run (recovery path, runtime-spec.md section 3).
+    def resume(self, run_id: str, response: Any = None) -> None:
+        """Resume a Run (recovery path, runtime-spec.md section 3).
 
-        V1 supports failed workflow runs only: workflow resume continues
-        from the engine's in-process state (LangGraph memory checkpointer),
-        so the same WorkflowRunner instance must serve the resumed
-        execution. Agent resume waits for durable checkpoint payloads
+        Two resumable states:
+        * FAILED (no response): failed workflow runs continue from the
+          engine's in-process state (LangGraph memory checkpointer), so
+          the same WorkflowRunner instance must serve the resume.
+        * WAITING_FOR_HUMAN (response required): the response is folded
+          into the paused Human node and execution continues.
+        Agent resume waits for durable checkpoint payloads
         (deepagents-runtime-spec.md section 8).
         """
         run = self._runs.get_run(run_id)
-        if run.status is not RunStatus.FAILED:
-            logger.info("run %s not resumable from %s; skipping", run_id, run.status.value)
+        if response is None:
+            if run.status is not RunStatus.FAILED:
+                logger.info("run %s not resumable from %s; skipping", run_id, run.status.value)
+                return
+        elif run.status is not RunStatus.WAITING_FOR_HUMAN:
+            logger.info(
+                "run %s does not wait for human input (%s); skipping response",
+                run_id,
+                run.status.value,
+            )
             return
         if run.runtime_type == "workflow":
-            self._resume_workflow(run_id)
+            self._resume_workflow(run_id, response=response)
         else:
             logger.info(
                 "resume not supported for runtime_type %s (run %s); skipping",
@@ -133,7 +147,7 @@ class RuntimeOrchestrator:
             logger.exception("workflow run %s failed", run_id)
             self._fail(run_id, str(exc))
 
-    def _resume_workflow(self, run_id: str) -> None:
+    def _resume_workflow(self, run_id: str, response: Any = None) -> None:
         if self._workflow_runner is None:
             self._fail_resume(run_id, "workflow runtime is not configured")
             return
@@ -146,13 +160,15 @@ class RuntimeOrchestrator:
         except KeyError as exc:
             self._fail_resume(run_id, exc.args[0] if exc.args else str(exc))
             return
-        self.events.publish(
-            run_id=run_id,
-            event_type=RuntimeEventType.RUN_RESUMED,
-            payload={"reason": "manual"},
-        )
+        if response is None:
+            # Failure recovery: announce before the runner restarts the run.
+            self.events.publish(
+                run_id=run_id,
+                event_type=RuntimeEventType.RUN_RESUMED,
+                payload={"reason": "manual"},
+            )
         try:
-            self._workflow_runner.resume(run_id=run_id, definition=definition)
+            self._workflow_runner.resume(run_id=run_id, definition=definition, response=response)
         except Exception as exc:  # noqa: BLE001 - normalize resume failures
             logger.exception("workflow resume %s failed", run_id)
             self._fail_resume(run_id, str(exc))

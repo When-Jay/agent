@@ -51,3 +51,28 @@ class NodeExecutor:
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(node.handler, state)
             return future.result(timeout=node.timeout_seconds)
+
+    # --- human-in-the-loop nodes ---------------------------------------------
+
+    def request_human_input(self, node: NodeSpec, state: dict[str, Any]) -> Any:
+        """Build the human-input request for a "human" node.
+
+        Emits NodeStarted; the handler builds the request payload
+        (question, context, options). The engine pauses the graph on the
+        returned request until a response is supplied.
+        """
+        self._emit_event(
+            "NodeStarted",
+            {"node": node.name, "attempt": 1, "retries": node.retries},
+        )
+        return node.handler(state)
+
+    def apply_human_response(self, node: NodeSpec, response: Any) -> dict[str, Any]:
+        """Fold a human response into the state update for a "human" node.
+
+        Note: on resume the engine replays the node function, so
+        request_human_input fires a second NodeStarted before this
+        completes the node (LangGraph interrupt semantics).
+        """
+        self._emit_event("NodeCompleted", {"node": node.name, "attempt": 1})
+        return {"human_response": response, "human_node": node.name}
