@@ -70,7 +70,12 @@ class WorkflowRunner:
         self._publish(
             run_id,
             RuntimeEventType.RUN_STARTED,
-            {"workflow": definition.name, "version": definition.version, "input": input or {}},
+            {
+                "workflow": definition.name,
+                "version": definition.version,
+                "definition_hash": definition.content_hash,
+                "input": input or {},
+            },
         )
         state = self._initial_state(definition, input)
         self._persist(run_id, state)
@@ -142,7 +147,11 @@ class WorkflowRunner:
         state["status"] = "completed"
         self._persist(run_id, state)
         self._runs.complete_run(run_id, output=dict(state["values"]))
-        self._publish(run_id, RuntimeEventType.RUN_COMPLETED, {"output": dict(state["values"])})
+        self._publish(
+            run_id,
+            RuntimeEventType.RUN_COMPLETED,
+            {"output": dict(state["values"]), "workflow": dict(state.get("definition", {}))},
+        )
         self._engine.drop(run_id)
         return WorkflowRunResult(status="completed", state=dict(state["values"]))
 
@@ -167,7 +176,11 @@ class WorkflowRunner:
 
     def _initial_state(self, definition: WorkflowDefinition, input: dict[str, Any] | None) -> dict[str, Any]:
         return {
-            "definition": {"name": definition.name, "version": definition.version},
+            "definition": {
+                "name": definition.name,
+                "version": definition.version,
+                "hash": definition.content_hash,
+            },
             "values": dict(input or {}),
             "status": "running",
         }
@@ -184,6 +197,15 @@ class WorkflowRunner:
             raise InvalidStateTransitionError(
                 f"run is bound to workflow {bound.get('name')}@{bound.get('version')}, "
                 f"got {definition.name}@{definition.version}"
+            )
+        # Content binding (section 6): same version label with different
+        # nodes/edges/handlers is a different workflow. Runs persisted
+        # before hashing carry no "hash" and stay resumable.
+        bound_hash = bound.get("hash")
+        if bound_hash is not None and bound_hash != definition.content_hash:
+            raise InvalidStateTransitionError(
+                f"run is bound to workflow {definition.name}@{definition.version} "
+                f"content {bound_hash}, got {definition.content_hash}"
             )
 
     def _persist(self, run_id: str, state: dict[str, Any]) -> None:

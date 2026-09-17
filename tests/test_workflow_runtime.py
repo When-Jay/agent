@@ -308,3 +308,91 @@ def test_resume_rejects_mismatched_workflow_version():
     )
     with pytest.raises(Exception, match="bound to workflow"):
         runner.resume(run_id=run_id, definition=other)
+
+
+# --- Versioning ---------------------------------------------------------------
+
+
+def _rebuildable_definition(step):
+    def second(state):
+        return {"second_done": True}
+
+    return WorkflowDefinition(
+        name="versioned",
+        version="v1",
+        nodes=[_node("first", step), _node("second", second)],
+        edges=[EdgeSpec(source="first", target="second")],
+        entry="first",
+    )
+
+
+def test_content_hash_is_stable_and_content_sensitive():
+    def step(state):
+        return {"first_done": True}
+
+    assert _rebuildable_definition(step).content_hash == _rebuildable_definition(step).content_hash
+
+    def alternative(state):
+        return {"first_done": True}
+
+    # Same version label, different handler wiring -> different content.
+    assert _rebuildable_definition(step).content_hash != _rebuildable_definition(alternative).content_hash
+
+    # Structural changes (retries) change the hash too.
+    def with_retry(state):
+        return {"first_done": True}
+
+    def second(state):
+        return {"second_done": True}
+
+    base = _rebuildable_definition(step)
+    retried = WorkflowDefinition(
+        name="versioned",
+        version="v1",
+        nodes=[_node("first", with_retry, retries=1), _node("second", second)],
+        edges=[EdgeSpec(source="first", target="second")],
+        entry="first",
+    )
+    assert base.content_hash != retried.content_hash
+
+
+def test_run_binds_definition_content_hash_in_state_and_events():
+    store = InMemoryRuntimeStore()
+    runner = WorkflowRunner(store)
+
+    def step(state):
+        return {"first_done": True}
+
+    definition = _rebuildable_definition(step)
+    run_id = _make_run(store)
+    runner.run(run_id=run_id, definition=definition, input={})
+
+    bound = store.get_state(run_id).values["workflow"]["definition"]
+    assert bound == {
+        "name": "versioned",
+        "version": "v1",
+        "hash": definition.content_hash,
+    }
+
+    started = _node_events(store, run_id, "RunStarted")[0]
+    assert started["definition_hash"] == definition.content_hash
+    completed = _node_events(store, run_id, "RunCompleted")[0]
+    assert completed["workflow"]["hash"] == definition.content_hash
+
+
+def test_resume_rejects_changed_content_under_same_version():
+    store = InMemoryRuntimeStore()
+    runner = WorkflowRunner(store)
+
+    def step(state):
+        raise RuntimeError("boom")
+
+    definition = _rebuildable_definition(step)
+    run_id = _make_run(store)
+    runner.run(run_id=run_id, definition=definition)
+
+    def alternative(state):
+        raise RuntimeError("boom")
+
+    with pytest.raises(Exception, match="content"):
+        runner.resume(run_id=run_id, definition=_rebuildable_definition(alternative))

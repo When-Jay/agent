@@ -5,6 +5,8 @@ through this module; the adapter compiles a WorkflowDefinition into an
 engine graph.
 """
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -49,6 +51,22 @@ class WorkflowDefinitionError(ValueError):
     """Raised when a workflow definition is structurally invalid."""
 
 
+def _callable_id(fn: Callable | None) -> str:
+    """Stable identity for a handler/condition (module + qualname).
+
+    Content hashes must be reproducible across processes, so memory
+    addresses (repr of lambdas/partial objects) are avoided; callables
+    without a qualname fall back to repr within a single process.
+    """
+    if fn is None:
+        return ""
+    module = getattr(fn, "__module__", None)
+    qualname = getattr(fn, "__qualname__", None)
+    if module and qualname:
+        return f"{module}:{qualname}"
+    return repr(fn)
+
+
 @dataclass
 class WorkflowDefinition:
     name: str
@@ -63,6 +81,32 @@ class WorkflowDefinition:
     @property
     def node_map(self) -> dict[str, NodeSpec]:
         return {node.name: node for node in self.nodes}
+
+    @property
+    def content_hash(self) -> str:
+        """Stable fingerprint of this definition's content (section 6).
+
+        Binds a Run to the exact definition it executed, beyond the
+        version label: two definitions with the same name@version but
+        different nodes/edges/wiring hash differently. Handler and
+        condition callables are identified by module+qualname.
+        """
+        payload = {
+            "name": self.name,
+            "version": self.version,
+            "entry": self.entry,
+            "nodes": [
+                [node.name, node.node_type, node.retries, node.timeout_seconds,
+                 _callable_id(node.handler)]
+                for node in self.nodes
+            ],
+            "edges": [
+                [edge.source, edge.target, _callable_id(edge.condition)]
+                for edge in self.edges
+            ],
+        }
+        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
     def outgoing(self, source: str) -> list[EdgeSpec]:
         return [edge for edge in self.edges if edge.source == source]
