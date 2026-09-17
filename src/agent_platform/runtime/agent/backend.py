@@ -8,6 +8,10 @@ default implementation on top of those primitives.
 
 Host paths must never be exposed to the model: the sandbox working
 directory is /workspace inside the isolated environment.
+
+Successful file writes are registered as platform Artifacts
+("DeepAgents artifact creation -> Artifact store", section 7) under a
+`sandbox://` URI that references the sandbox copy, never a host path.
 """
 
 from uuid import uuid4
@@ -19,6 +23,7 @@ from deepagents.backends.protocol import (
 )
 from deepagents.backends.sandbox import BaseSandbox
 
+from agent_platform.runtime.core import ArtifactStore
 from agent_platform.sandbox.manager import SandboxManager
 from agent_platform.sandbox.models import ExecutionRequest, FileUpload
 
@@ -26,9 +31,18 @@ from agent_platform.sandbox.models import ExecutionRequest, FileUpload
 class PlatformSandboxBackend(BaseSandbox):
     """Executes agent file/command operations inside a platform sandbox."""
 
-    def __init__(self, sandbox_manager: SandboxManager, sandbox_id: str) -> None:
+    def __init__(
+        self,
+        sandbox_manager: SandboxManager,
+        sandbox_id: str,
+        *,
+        artifacts: ArtifactStore | None = None,
+        run_id: str | None = None,
+    ) -> None:
         self._manager = sandbox_manager
         self._sandbox_id = sandbox_id
+        self._artifacts = artifacts
+        self._run_id = run_id
 
     @property
     def id(self) -> str:
@@ -40,6 +54,7 @@ class PlatformSandboxBackend(BaseSandbox):
             self._sandbox_id,
             [FileUpload(path=path, content=content) for path, content in files],
         )
+        self._register_artifacts(files, uploads)
         return [
             FileUploadResponse(path=result.path, error=result.error)
             for result in uploads
@@ -73,3 +88,23 @@ class PlatformSandboxBackend(BaseSandbox):
             exit_code=result.exit_code,
             truncated=result.truncated,
         )
+
+    def _register_artifacts(
+        self, files: list[tuple[str, bytes]], uploads: list
+    ) -> None:
+        """Register successful writes as Artifacts (deepagents-runtime-spec §7).
+
+        Failed uploads (result.error set) produce no Artifact. Registration
+        is skipped entirely when no artifact store/run is wired in.
+        """
+        if self._artifacts is None or self._run_id is None:
+            return
+        for (_path, content), result in zip(files, uploads):
+            if result.error is not None:
+                continue
+            self._artifacts.create(
+                run_id=self._run_id,
+                name=result.path,
+                uri=f"sandbox://{self._sandbox_id}/{result.path}",
+                metadata={"sandbox_id": self._sandbox_id, "size": len(content)},
+            )

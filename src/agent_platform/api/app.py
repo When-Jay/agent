@@ -17,6 +17,7 @@ from agent_platform.errors import NotFoundError
 from agent_platform.logging import configure_logging
 from agent_platform.runtime.core import (
     Application,
+    Artifact,
     EventBus,
     Run,
     RuntimeEvent,
@@ -258,6 +259,23 @@ def create_app(
             raise HTTPException(status_code=404, detail=f"run not found: {run_id}") from None
         return {"events": [_event_payload(event) for event in events.list_events(run_id)]}
 
+    @app.get("/api/v1/runs/{run_id}/artifacts")
+    def list_run_artifacts(run_id: str) -> dict[str, Any]:
+        try:
+            runs.get_run(run_id)
+        except NotFoundError:
+            raise HTTPException(status_code=404, detail=f"run not found: {run_id}") from None
+        return {"artifacts": [_artifact_payload(a) for a in store.list_artifacts_for_run(run_id)]}
+
+    @app.get("/api/v1/artifacts/{artifact_id}")
+    def get_artifact(artifact_id: str) -> dict[str, Any]:
+        artifact = store.get_artifact(artifact_id)
+        if artifact is None:
+            raise HTTPException(
+                status_code=404, detail=f"artifact not found: {artifact_id}"
+            ) from None
+        return _artifact_payload(artifact)
+
     @app.get("/api/v1/runs/{run_id}/events/stream")
     def stream_run_events(run_id: str) -> StreamingResponse:
         """SSE stream of one run's events (02-api-architecture.md section 4).
@@ -354,4 +372,15 @@ def _event_payload(event: RuntimeEvent) -> dict[str, Any]:
         "event_type": event.event_type.value,
         "payload": event.payload,
         "created_at": event.created_at.isoformat(),
+    }
+
+
+def _artifact_payload(artifact: Artifact) -> dict[str, Any]:
+    return {
+        "id": artifact.id,
+        "run_id": artifact.run_id,
+        "name": artifact.name,
+        "uri": artifact.uri,
+        "metadata": artifact.metadata,
+        "created_at": artifact.created_at.isoformat(),
     }

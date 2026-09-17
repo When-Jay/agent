@@ -29,6 +29,7 @@ from agent_platform.runtime.agent.tools import LangChainToolAdapter
 from agent_platform.runtime.capabilities.budget import BudgetCapability, BudgetSpec
 from agent_platform.runtime.capabilities.tool_capability import ToolCapability
 from agent_platform.runtime.core import (
+    ArtifactStore,
     CheckpointStore,
     EventBus,
     RunManager,
@@ -102,7 +103,12 @@ class DeepAgentsRuntimeAdapter:
         try:
             sandbox = await self._create_sandbox(run, config)
             backend = (
-                PlatformSandboxBackend(self._sandbox_manager, sandbox.sandbox_id)
+                PlatformSandboxBackend(
+                    self._sandbox_manager,
+                    sandbox.sandbox_id,
+                    artifacts=ArtifactStore(self._store),
+                    run_id=run_id,
+                )
                 if sandbox is not None
                 else None
             )

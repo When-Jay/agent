@@ -23,6 +23,7 @@ class InMemoryRuntimeStore:
         self.checkpoints: dict[str, Checkpoint] = {}
         self.checkpoints_by_run: dict[str, list[str]] = {}
         self.artifacts: dict[str, Artifact] = {}
+        self.artifacts_by_run: dict[str, list[str]] = {}
 
     def save_application(self, application: Application) -> None:
         self.applications[application.id] = application
@@ -88,9 +89,13 @@ class InMemoryRuntimeStore:
 
     def save_artifact(self, artifact: Artifact) -> None:
         self.artifacts[artifact.id] = artifact
+        self.artifacts_by_run.setdefault(artifact.run_id, []).append(artifact.id)
 
     def get_artifact(self, artifact_id: str) -> Artifact | None:
         return self.artifacts.get(artifact_id)
+
+    def list_artifacts_for_run(self, run_id: str) -> list[Artifact]:
+        return [self.artifacts[a] for a in self.artifacts_by_run.get(run_id, [])]
 
 
 class CheckpointStore:
@@ -133,3 +138,6 @@ class ArtifactStore:
 
     def get(self, artifact_id: str) -> Artifact | None:
         return self._store.get_artifact(artifact_id)
+
+    def list_for_run(self, run_id: str) -> list[Artifact]:
+        return self._store.list_artifacts_for_run(run_id)

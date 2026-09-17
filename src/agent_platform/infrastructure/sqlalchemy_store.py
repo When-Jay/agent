@@ -390,3 +390,22 @@ class SQLAlchemyRuntimeStore:
             if row
             else None
         )
+
+    def list_artifacts_for_run(self, run_id: str) -> list[Artifact]:
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                select(_artifacts)
+                .where(_artifacts.c.run_id == run_id)
+                .order_by(_artifacts.c.created_at, _artifacts.c.id)
+            ).mappings().all()
+        return [
+            Artifact(
+                id=row["id"],
+                run_id=row["run_id"],
+                name=row["name"],
+                uri=row["uri"],
+                metadata=row["metadata"] or {},
+                created_at=row["created_at"],
+            )
+            for row in rows
+        ]
