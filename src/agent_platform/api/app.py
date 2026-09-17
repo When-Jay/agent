@@ -173,22 +173,17 @@ def create_app(
                 status_code=409,
                 detail=f"run {run_id} cannot be resumed from status {run.status.value}",
             )
-        if run.runtime_type != "workflow":
-            # V1 boundary: agent resume needs durable LangGraph checkpoint
-            # payloads (deepagents-runtime-spec.md section 8).
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"resume is not supported for runtime_type {run.runtime_type}; "
-                    "agent resume requires durable checkpoints"
-                ),
-            )
         enqueue_resume(celery, run_id)
         return _run_payload(runs.get_run(run_id))
 
     @app.post("/api/v1/runs/{run_id}/respond")
     def respond_run(run_id: str, request: RespondRunRequest) -> dict[str, Any]:
-        """Deliver a human response to a run paused on a Human node."""
+        """Deliver a human response to a run paused on a Human node or an
+        agent approval interrupt.
+
+        Agent runs expect a LangChain HITLResponse:
+        `{"decisions": [{"type": "approve"} | {"type": "reject", "message": ...}]}`.
+        """
         try:
             run = runs.get_run(run_id)
         except NotFoundError:

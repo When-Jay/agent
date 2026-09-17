@@ -174,7 +174,7 @@ def test_orchestrator_resume_continues_failed_workflow_run():
     assert types[-1] == "RunCompleted"
 
 
-def test_orchestrator_resume_skips_non_failed_and_agent_runs():
+def test_orchestrator_resume_skips_non_failed_and_routes_agent():
     store = InMemoryRuntimeStore()
     runs = RunManager(store)
     run = _queued_run(store)
@@ -184,7 +184,16 @@ def test_orchestrator_resume_skips_non_failed_and_agent_runs():
     assert runs.get_run(run.id).status is RunStatus.QUEUED
 
     runs.fail_run(run.id, error="boom")
-    orchestrator.resume(run.id)  # agent run: resume unsupported in V1 -> skip
+    resumed: list[str] = []
+
+    class _StubAgentAdapter:
+        async def run(self, run_id: str) -> None: ...  # pragma: no cover
+
+        async def resume(self, run_id: str, response=None) -> None:
+            resumed.append(run_id)
+
+    RuntimeOrchestrator(store, agent_adapter=_StubAgentAdapter()).resume(run.id)
+    assert resumed == [run.id]
     saved = runs.get_run(run.id)
     assert saved.status is RunStatus.FAILED
     assert saved.error == "boom"

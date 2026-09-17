@@ -8,9 +8,11 @@ sandbox backend adaptation and RuntimeEvent mapping.
 
 from agent_platform.runtime.agent.adapter import AgentRunResult, DeepAgentsRuntimeAdapter
 from agent_platform.runtime.agent.backend import PlatformSandboxBackend
+from agent_platform.runtime.agent.checkpoint_saver import StoreCheckpointSaver
 from agent_platform.runtime.agent.middleware import (
     BudgetExceededError,
     BudgetMiddleware,
+    HumanApprovalMiddleware,
     RuntimeEventMiddleware,
     ToolPermissionDeniedError,
     ToolPermissionMiddleware,
@@ -22,9 +24,11 @@ __all__ = [
     "BudgetExceededError",
     "BudgetMiddleware",
     "DeepAgentsRuntimeAdapter",
+    "HumanApprovalMiddleware",
     "LangChainToolAdapter",
     "PlatformSandboxBackend",
     "RuntimeEventMiddleware",
+    "StoreCheckpointSaver",
     "ToolAdaptationError",
     "ToolPermissionDeniedError",
     "ToolPermissionMiddleware",

@@ -5,6 +5,7 @@ applications, sessions and runs. Each test uses an isolated SQLite
 database so the process-wide in-memory singleton is never touched.
 """
 
+from typing import Any
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
@@ -42,6 +43,15 @@ class _StubAgentAdapter:
         self._runs.start_run(run_id)
         self._events.publish(run_id=run_id, event_type=RuntimeEventType.RUN_STARTED, payload={})
         self._runs.complete_run(run_id, output={"final": "ok"})
+        self._events.publish(
+            run_id=run_id, event_type=RuntimeEventType.RUN_COMPLETED, payload={}
+        )
+
+    async def resume(self, run_id: str, response: Any = None):
+        self.executed.append(f"resume:{run_id}")
+        self._runs.restart_run(run_id)
+        self._events.publish(run_id=run_id, event_type=RuntimeEventType.RUN_RESUMED, payload={})
+        self._runs.complete_run(run_id, output={"final": "resumed"})
         self._events.publish(
             run_id=run_id, event_type=RuntimeEventType.RUN_COMPLETED, payload={}
         )
@@ -327,9 +337,12 @@ def test_resume_failed_workflow_run_executes_eagerly(tmp_path):
 
 
 def test_resume_rejects_invalid_requests(tmp_path):
-    client, store = _client(tmp_path)
+    database_url = f"sqlite:///{tmp_path / 'api.db'}"
+    store = create_runtime_store(database_url)
+    settings = Settings(database_url=database_url, celery_task_always_eager=True)
     runs = RunManager(store)
-    # failed agent run: resume unsupported in V1 (durable checkpoints pending)
+    # failed agent run: resume now routes to the agent adapter (durable
+    # checkpoints); the eager worker completes it through the stub.
     _, _, agent_run = _seed_run(store)
     runs.start_run(agent_run.id)
     runs.fail_run(agent_run.id, error="boom")
@@ -343,9 +356,18 @@ def test_resume_rejects_invalid_requests(tmp_path):
         status=RunStatus.QUEUED,
     )
 
-    agent_resume = client.post(f"/api/v1/runs/{agent_run.id}/resume")
-    assert agent_resume.status_code == 409
-    assert "agent resume requires durable checkpoints" in agent_resume.json()["detail"]
+    dispatch_tasks.set_orchestrator_builder(
+        lambda: RuntimeOrchestrator(store, agent_adapter=_StubAgentAdapter(store))
+    )
+    try:
+        client = TestClient(create_app(settings))
+        agent_resume = client.post(f"/api/v1/runs/{agent_run.id}/resume")
+    finally:
+        dispatch_tasks.set_orchestrator_builder(None)
+
+    assert agent_resume.status_code == 200
+    assert agent_resume.json()["status"] == "completed"
+    assert agent_resume.json()["output"] == {"final": "resumed"}
 
     assert client.post(f"/api/v1/runs/{workflow_run.id}/resume").status_code == 409
     assert client.post(f"/api/v1/runs/{uuid4()}/resume").status_code == 404

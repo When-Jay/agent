@@ -16,12 +16,14 @@ from deepagents import create_deep_agent
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.types import Command
 
 from agent_platform.errors import InvalidStateTransitionError
 from agent_platform.runtime.agent.backend import PlatformSandboxBackend
 from agent_platform.runtime.agent.middleware import (
     BudgetExceededError,
     BudgetMiddleware,
+    HumanApprovalMiddleware,
     RuntimeEventMiddleware,
     ToolPermissionMiddleware,
 )
@@ -50,7 +52,7 @@ class AgentRunResult:
     """Platform-facing result of one agent run."""
 
     run_id: str
-    status: str  # "completed" | "failed"
+    status: str  # "completed" | "failed" | "waiting_for_human"
     output: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
 
@@ -98,6 +100,38 @@ class DeepAgentsRuntimeAdapter:
         self._runs.start_run(run_id)
         self._publish(run_id, RuntimeEventType.RUN_STARTED, {"runtime_type": run.runtime_type})
 
+        input_message = run.input.get("message") or _dumps(run.input)
+        agent_input: Any = {"messages": [HumanMessage(content=input_message)]}
+        return await self._drive(run, agent_input, reason="error")
+
+    async def resume(self, run_id: str, response: Any = None) -> AgentRunResult:
+        """Resume an interrupted or failed agent run (runtime-spec section 3).
+
+        * WAITING_FOR_HUMAN + response: the response folds into the pending
+          approval interrupt (LangChain HITLResponse: {"decisions": [...]}) —
+          only the middleware hook node replays, the model is not re-invoked.
+        * FAILED without response: continue from the last durable checkpoint
+          (requires a durable checkpointer, deepagents-runtime-spec section 8).
+        """
+        run = self._runs.get_run(run_id)
+        if run.status not in {RunStatus.WAITING_FOR_HUMAN, RunStatus.FAILED}:
+            raise InvalidStateTransitionError(f"cannot resume run from {run.status.value}")
+        waiting = run.status is RunStatus.WAITING_FOR_HUMAN
+        if waiting and response is None:
+            raise InvalidStateTransitionError(
+                f"run {run_id} waits for human input; a response is required to resume"
+            )
+        self._runs.restart_run(run_id)
+        if waiting:
+            self._publish(
+                run_id, RuntimeEventType.HUMAN_RESPONSE_RECEIVED, {"node": "agent", "response": response}
+            )
+            self._publish(run_id, RuntimeEventType.RUN_RESUMED, {"reason": "human_response"})
+        agent_input: Any = Command(resume=response) if waiting else None
+        return await self._drive(run, agent_input, reason="resume")
+
+    async def _drive(self, run, agent_input: Any, *, reason: str) -> AgentRunResult:
+        run_id = run.id
         config = self._agent_config(run)
         sandbox = None
         try:
@@ -122,27 +156,56 @@ class DeepAgentsRuntimeAdapter:
                 checkpointer=self._checkpointer,
             )
 
-            input_message = run.input.get("message") or _dumps(run.input)
             state = await agent.ainvoke(
-                {"messages": [HumanMessage(content=input_message)]},
+                agent_input,
                 config={"configurable": {"thread_id": run_id}},
             )
-
-            output = self._map_output(state)
-            self._bridge_checkpoint(run_id)
-            self._runs.complete_run(run_id, output=output)
-            self._publish(run_id, RuntimeEventType.RUN_COMPLETED, {"output": output})
-            return AgentRunResult(run_id=run_id, status="completed", output=output)
+            return await self._finish_or_pause(agent, run_id, state)
         except BudgetExceededError as exc:
             # Budget is a governance stop, not an execution bug: record and
-            # surface as failed run (pause/resume via interrupt is future work).
+            # surface as failed run.
             return self._fail(run_id, exc, reason="budget")
         except Exception as exc:  # noqa: BLE001 - normalize any agent failure
             logger.exception("agent run %s failed", run_id)
-            return self._fail(run_id, exc, reason="error")
+            return self._fail(run_id, exc, reason=reason)
         finally:
             if sandbox is not None and self._sandbox_manager is not None:
                 await self._destroy_sandbox(sandbox)
+
+    async def _finish_or_pause(self, agent, run_id: str, state: Any) -> AgentRunResult:
+        """Map an ainvoke result to completion or a HITL pause (spec section 9)."""
+        pending = None
+        if self._checkpointer is not None:
+            # The result state may carry a stale __interrupt__ entry from an
+            # earlier superstep; the snapshot is authoritative about whether
+            # the graph is still paused right now (same mechanism as the
+            # workflow engine).
+            snapshot = await agent.aget_state({"configurable": {"thread_id": run_id}})
+            if snapshot.next:
+                pending = [task.interrupts[0].value for task in snapshot.tasks if task.interrupts]
+        elif isinstance(state, dict):
+            interrupts = state.get("__interrupt__")
+            pending = [item.value for item in interrupts] if interrupts else None
+        if pending:
+            # Pending tool approval: park the run and surface the request
+            # (HITLRequest payload) for the respond API.
+            self._runs.pause_run(run_id)
+            self._publish(
+                run_id,
+                RuntimeEventType.RUN_PAUSED,
+                {"node": "agent", "reason": "approval_required"},
+            )
+            self._publish(
+                run_id,
+                RuntimeEventType.APPROVAL_REQUIRED,
+                {"node": "agent", "request": pending[0]},
+            )
+            return AgentRunResult(run_id=run_id, status="waiting_for_human")
+        output = self._map_output(state)
+        self._bridge_checkpoint(run_id)
+        self._runs.complete_run(run_id, output=output)
+        self._publish(run_id, RuntimeEventType.RUN_COMPLETED, {"output": output})
+        return AgentRunResult(run_id=run_id, status="completed", output=output)
 
     # --- assembly -----------------------------------------------------------
 
@@ -172,12 +235,19 @@ class DeepAgentsRuntimeAdapter:
 
         allowed_tools = config.get("tools")
         budget = self._budget_factory(config.get("budget"))
-        return [
+        middleware: list = [
             RuntimeEventMiddleware(emit=emit),
             ToolPermissionMiddleware(allowed_tools),
             BudgetMiddleware(budget),
             *self._extra_middleware,
         ]
+        # HITL policy (deepagents-runtime-spec section 5): {"tool": [decisions]}
+        # pauses the run before that tool executes; the decision arrives via
+        # POST /runs/{id}/respond and adapter.resume().
+        approvals = config.get("approvals")
+        if approvals:
+            middleware.append(HumanApprovalMiddleware(approvals))
+        return middleware
 
     @staticmethod
     def _default_budget(spec: dict[str, Any] | None) -> BudgetCapability:

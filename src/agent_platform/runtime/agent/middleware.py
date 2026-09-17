@@ -6,6 +6,7 @@ instead of a custom middleware framework:
 * RuntimeEventMiddleware - emits RuntimeEvents for LLM and tool calls
 * BudgetMiddleware - enforces BudgetSpec limits on model usage
 * ToolPermissionMiddleware - restricts which tools the model may call
+* HumanApprovalMiddleware - pauses tool calls for human approval (HITL)
 
 Middleware may read platform configuration and emit events, but must
 not import API request handlers.
@@ -15,7 +16,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from langchain.agents.middleware import AgentMiddleware
+from langchain.agents.middleware import AgentMiddleware, HumanInTheLoopMiddleware
 from langchain.agents.middleware.types import ModelRequest, ToolCallRequest
 from langchain_core.messages import AIMessage
 
@@ -127,3 +128,26 @@ class ToolPermissionMiddleware(AgentMiddleware):
             if tool_name not in self._allowed:
                 raise ToolPermissionDeniedError(f"tool not allowed: {tool_name}")
         return await handler(request)
+
+
+class HumanApprovalMiddleware(HumanInTheLoopMiddleware):
+    """Platform HITL gate over LangChain's interrupt mechanic (spec sections 5, 9).
+
+    Delegates the pause/resume mechanics to `HumanInTheLoopMiddleware`
+    (after_model hook: pending tool calls are interrupted before any tool
+    executes, so replay never re-runs approved tools). This subclass only
+    adapts the platform approval policy shape: `{tool: [decisions] | True}`.
+
+    On resume the response must be a LangChain HITLResponse:
+    `{"decisions": [{"type": "approve"} | {"type": "reject", "message": ...}]}`.
+    """
+
+    def __init__(self, approvals: dict[str, Any]) -> None:
+        interrupt_on: dict[str, Any] = {}
+        for tool_name, policy in approvals.items():
+            interrupt_on[tool_name] = (
+                {"allowed_decisions": list(policy)}
+                if isinstance(policy, (list, tuple))
+                else policy
+            )
+        super().__init__(interrupt_on)

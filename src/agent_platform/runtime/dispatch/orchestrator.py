@@ -14,6 +14,7 @@ import logging
 from typing import Any
 
 from agent_platform.config import Settings
+from agent_platform.runtime.agent import StoreCheckpointSaver
 from agent_platform.runtime.core import (
     EventBus,
     InMemoryRuntimeStore,
@@ -91,13 +92,14 @@ class RuntimeOrchestrator:
         """Resume a Run (recovery path, runtime-spec.md section 3).
 
         Two resumable states:
-        * FAILED (no response): failed workflow runs continue from the
-          engine's in-process state (LangGraph memory checkpointer), so
-          the same WorkflowRunner instance must serve the resume.
+        * FAILED (no response): the run continues from its last durable
+          checkpoint. Workflow runs replay engine in-process state; agent
+          runs replay the LangGraph thread through the configured
+          checkpointer (durable with StoreCheckpointSaver, deepagents-
+          runtime-spec.md section 8).
         * WAITING_FOR_HUMAN (response required): the response is folded
-          into the paused Human node and execution continues.
-        Agent resume waits for durable checkpoint payloads
-        (deepagents-runtime-spec.md section 8).
+          into the paused node (workflow Human node or agent approval
+          interrupt) and execution continues.
         """
         run = self._runs.get_run(run_id)
         if response is None:
@@ -113,6 +115,11 @@ class RuntimeOrchestrator:
             return
         if run.runtime_type == "workflow":
             self._resume_workflow(run_id, response=response)
+        elif run.runtime_type == "agent":
+            if self._agent_adapter is None:
+                self._fail(run_id, "agent runtime adapter is not configured")
+                return
+            asyncio.run(self._agent_adapter.resume(run_id, response=response))
         else:
             logger.info(
                 "resume not supported for runtime_type %s (run %s); skipping",
@@ -212,15 +219,23 @@ def _default_model_factory(model_spec: str):
 
 
 def build_agent_adapter(store: RuntimeStore, *, event_bus: EventBus):
-    """Compose the default DeepAgents adapter over Runtime Core."""
+    """Compose the default DeepAgents adapter over Runtime Core.
+
+    Durable checkpoint payloads ride on the store's own engine when one
+    exists (SQLAlchemy store); in-memory stores get no checkpointer and
+    agent resume is unavailable there (spec section 8).
+    """
     from agent_platform.runtime.agent import DeepAgentsRuntimeAdapter
     from agent_platform.runtime.capabilities.tool_capability import InMemoryToolCapability
 
+    engine = getattr(store, "engine", None)
+    checkpointer = StoreCheckpointSaver(engine) if engine is not None else None
     return DeepAgentsRuntimeAdapter(
         store,
         model_factory=_default_model_factory,
         tool_capability=InMemoryToolCapability(),
         event_bus=event_bus,
+        checkpointer=checkpointer,
     )
 
 
