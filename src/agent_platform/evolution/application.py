@@ -644,12 +644,6 @@ class EvolutionService:
             },
         }
 
-    def _validation_experiment(self, run_id: str, candidate_id: str):
-        for experiment in self._store.list_experiments_for_run(run_id):
-            if experiment.candidate_id == candidate_id and experiment.purpose == "VALIDATION":
-                return experiment
-        return None
-
     def _experiments_by_candidate(self, run_id: str) -> dict[str, dict]:
         grouped: dict[str, dict] = {}
         for experiment in self._store.list_experiments_for_run(run_id):
