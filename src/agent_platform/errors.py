@@ -8,3 +8,7 @@ class NotFoundError(PlatformError):
 
 class InvalidStateTransitionError(PlatformError, ValueError):
     """Raised when a lifecycle transition violates the runtime contract."""
+
+
+class ToolPermissionDeniedError(PlatformError):
+    """Raised when a tool call is rejected by a permission policy."""

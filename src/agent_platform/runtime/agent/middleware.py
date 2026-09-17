@@ -19,7 +19,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelRequest, ToolCallRequest
 from langchain_core.messages import AIMessage
 
-from agent_platform.errors import PlatformError
+from agent_platform.errors import PlatformError, ToolPermissionDeniedError
 from agent_platform.runtime.capabilities.budget import BudgetCapability
 from agent_platform.runtime.core.events import RuntimeEventType
 
@@ -36,8 +36,8 @@ class BudgetExceededError(PlatformError):
         super().__init__(f"budget exceeded: {dimension}")
 
 
-class ToolPermissionDeniedError(PlatformError):
-    """Raised by ToolPermissionMiddleware when a tool is not allowed."""
+# ToolPermissionDeniedError lives in agent_platform.errors so the MCP
+# gateway and agent middleware enforce the same permission error type.
 
 
 def _extract_ai_message(result: Any) -> AIMessage | None:
