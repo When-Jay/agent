@@ -14,7 +14,12 @@ from pydantic import BaseModel, Field
 from agent_platform.evaluation.application import EvaluationService
 from agent_platform.evaluation.cases import CaseService
 from agent_platform.evaluation.diagnosis import DiagnosisService
-from agent_platform.evaluation.domain import CaseSource, CaseType
+from agent_platform.evaluation.domain import (
+    ABVariant,
+    CaseSource,
+    CaseType,
+)
+from agent_platform.evaluation.online import OnlineEvaluationService
 from agent_platform.errors import NotFoundError
 
 
@@ -103,12 +108,32 @@ class PromoteCaseRequest(BaseModel):
     asset_name: str = "regression-set"
 
 
+class ABVariantSpec(BaseModel):
+    key: str
+    agent_version: str = ""
+    weight: float = 1.0
+
+
+class CreateABTestRequest(BaseModel):
+    name: str
+    application_id: str
+    runtime_type: str = "agent"
+    variants: list[ABVariantSpec]
+    sampling_rate: float = 1.0
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AssignRunRequest(BaseModel):
+    run_id: str
+
+
 def create_evaluation_router(
     service: EvaluationService,
     *,
     run_dispatcher: Callable[[str], None],
     case_service: CaseService | None = None,
     diagnosis_service: DiagnosisService | None = None,
+    online_service: OnlineEvaluationService | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/v1/evaluation", tags=["evaluation"])
 
@@ -273,6 +298,73 @@ def create_evaluation_router(
         _require_case_service(case_service)
         return _dump(case_service.dismiss_case(case_id))
 
+    # --- online evaluation: A/B (spec section 21) --------------------------------
+
+    @router.post("/ab-tests", status_code=201)
+    def create_ab_test(request: CreateABTestRequest) -> dict:
+        _require_online_service(online_service)
+        try:
+            return _dump(
+                online_service.create_ab_test(
+                    name=request.name,
+                    application_id=request.application_id,
+                    runtime_type=request.runtime_type,
+                    variants=[
+                        ABVariant(key=v.key, agent_version=v.agent_version, weight=v.weight)
+                        for v in request.variants
+                    ],
+                    sampling_rate=request.sampling_rate,
+                    metadata=request.metadata,
+                )
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    @router.get("/ab-tests")
+    def list_ab_tests(
+        application_id: str | None = None, status: str | None = None
+    ) -> list[dict]:
+        _require_online_service(online_service)
+        return [
+            _dump(t)
+            for t in online_service.list_ab_tests(
+                application_id=application_id, status=status
+            )
+        ]
+
+    @router.get("/ab-tests/{ab_test_id}")
+    def get_ab_test(ab_test_id: str) -> dict:
+        _require_online_service(online_service)
+        return _dump(online_service.get_ab_test(ab_test_id))
+
+    @router.post("/ab-tests/{ab_test_id}/start")
+    def start_ab_test(ab_test_id: str) -> dict:
+        _require_online_service(online_service)
+        return _dump(online_service.start_ab_test(ab_test_id))
+
+    @router.post("/ab-tests/{ab_test_id}/pause")
+    def pause_ab_test(ab_test_id: str) -> dict:
+        _require_online_service(online_service)
+        return _dump(online_service.pause_ab_test(ab_test_id))
+
+    @router.post("/ab-tests/{ab_test_id}/complete")
+    def complete_ab_test(ab_test_id: str) -> dict:
+        _require_online_service(online_service)
+        return _dump(online_service.complete_ab_test(ab_test_id))
+
+    @router.post("/ab-tests/{ab_test_id}/assign")
+    def assign_run(ab_test_id: str, request: AssignRunRequest) -> dict:
+        """Sticky-split one run against this experiment (idempotent)."""
+        _require_online_service(online_service)
+        online_service.get_ab_test(ab_test_id)  # 404 on unknown test
+        assignment = online_service.assign_run(request.run_id)
+        return {"assignment": _dump(assignment) if assignment else None}
+
+    @router.get("/ab-tests/{ab_test_id}/report")
+    def ab_test_report(ab_test_id: str) -> dict:
+        _require_online_service(online_service)
+        return _dump(online_service.report(ab_test_id))
+
     return router
 
 
@@ -288,6 +380,12 @@ def _require_diagnosis_service(diagnosis_service: DiagnosisService | None) -> Di
     return diagnosis_service
 
 
+def _require_online_service(online_service: OnlineEvaluationService | None) -> OnlineEvaluationService:
+    if online_service is None:
+        raise RuntimeError("online evaluation service is not wired into the evaluation API")
+    return online_service
+
+
 def _dump(value) -> dict:
     from agent_platform.evaluation.serialization import dump
 
@@ -301,6 +399,7 @@ def attach_evaluation_routes(
     run_dispatcher: Callable[[str], None],
     case_service: CaseService | None = None,
     diagnosis_service: DiagnosisService | None = None,
+    online_service: OnlineEvaluationService | None = None,
 ) -> None:
     """Mount evaluation routes; NotFoundError from evaluation handlers maps to 404.
 
@@ -314,6 +413,7 @@ def attach_evaluation_routes(
             run_dispatcher=run_dispatcher,
             case_service=case_service,
             diagnosis_service=diagnosis_service,
+            online_service=online_service,
         )
     )
 

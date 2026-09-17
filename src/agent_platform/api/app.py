@@ -26,6 +26,7 @@ from agent_platform.evaluation.api import attach_evaluation_routes
 from agent_platform.evaluation.application import EvaluationService
 from agent_platform.evaluation.cases import CaseMiner, CaseService
 from agent_platform.evaluation.diagnosis import DiagnosisService
+from agent_platform.evaluation.online import OnlineEvaluationService
 from agent_platform.evolution.application import EvolutionService
 from agent_platform.evaluation.evaluators import (
     EvaluatorRegistry,
@@ -207,6 +208,10 @@ def create_app(
             input=request.input,
             status=RunStatus.QUEUED,
         )
+        # A/B 分流钩子（evaluation-spec.md section 21）：online_service 在
+        # 组合根末尾接线，闭包于请求时解析；无 RUNNING 实验时为 no-op。
+        # 分流只记录 run ↔ variant 绑定事实，不改变执行路径。
+        online_service.assign_run(run.id)
         enqueue_run(celery, run.id)
         return _run_payload(runs.get_run(run.id))
 
@@ -574,12 +579,15 @@ def create_app(
         miner=CaseMiner(store, evaluation_store),
     )
     diagnosis_service = DiagnosisService(store, evaluation_store)
+    # Online Evaluation mode=AB (spec section 21): traffic split + measurement.
+    online_service = OnlineEvaluationService(store, evaluation_store)
     attach_evaluation_routes(
         app,
         evaluation_service,
         run_dispatcher=lambda run_id: enqueue_evaluation_run(celery, run_id),
         case_service=case_service,
         diagnosis_service=diagnosis_service,
+        online_service=online_service,
     )
 
     # Evolution platform (060-evolution.md): candidate generation reuses the

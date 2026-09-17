@@ -12,6 +12,15 @@ from agent_platform.evaluation.domain.case import (
     DiagnosisResult,
     RecommendedAction,
 )
+from agent_platform.evaluation.domain.online import (
+    AB_COMPLETED,
+    AB_DRAFT,
+    AB_PAUSED,
+    AB_RUNNING,
+    ABAssignment,
+    ABTest,
+    ABVariant,
+)
 from agent_platform.evaluation.domain.gate import (
     GateAction,
     GateDecision,
@@ -44,6 +53,13 @@ from agent_platform.evaluation.domain.suite import (
 from agent_platform.evaluation.domain.task import ExpectedBehavior, Task, new_id, utcnow
 
 __all__ = [
+    "ABAssignment",
+    "AB_COMPLETED",
+    "AB_DRAFT",
+    "AB_PAUSED",
+    "AB_RUNNING",
+    "ABTest",
+    "ABVariant",
     "ASSET_CALIBRATION",
     "ASSET_CHALLENGE",
     "ASSET_GOLDEN",

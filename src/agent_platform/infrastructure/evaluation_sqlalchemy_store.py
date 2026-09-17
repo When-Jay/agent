@@ -12,6 +12,8 @@ from typing import Any
 from sqlalchemy import JSON, Column, DateTime, Integer, MetaData, String, Table, insert, select
 
 from agent_platform.evaluation.domain import (
+    ABAssignment,
+    ABTest,
     Case,
     DiagnosisResult,
     EvaluationAsset,
@@ -126,6 +128,26 @@ _diagnoses = Table(
     Column("id", String(64), nullable=False),
     Column("case_id", String(64), nullable=False, index=True),
     Column("category", String(32), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("payload", JSON, nullable=False),
+)
+_ab_tests = Table(
+    "evaluation_ab_tests", metadata,
+    Column("id", String(64), primary_key=True),
+    Column("name", String(255), nullable=False),
+    Column("application_id", String(64), nullable=False, index=True),
+    Column("runtime_type", String(32), nullable=False),
+    Column("status", String(32), nullable=False, index=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("payload", JSON, nullable=False),
+)
+_ab_assignments = Table(
+    "evaluation_ab_assignments", metadata,
+    Column("id", String(64), primary_key=True),
+    Column("ab_test_id", String(64), nullable=False, index=True),
+    Column("run_id", String(64), nullable=False, unique=True),
+    Column("session_id", String(64), nullable=False),
+    Column("variant_key", String(64), nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("payload", JSON, nullable=False),
 )
@@ -409,6 +431,73 @@ class SQLEvaluationStore:
                 .order_by(_diagnoses.c.seq)
             ).mappings().all()
         return [_payload(_diagnoses, (), row, DiagnosisResult) for row in rows]
+
+    # -- online evaluation: A/B ----------------------------------------------------
+    def save_ab_test(self, test: ABTest) -> None:
+        values = {
+            "id": test.id,
+            "name": test.name,
+            "application_id": test.application_id,
+            "runtime_type": test.runtime_type,
+            "status": test.status,
+            "created_at": test.created_at,
+            "payload": dump(test),
+        }
+        with self.engine.begin() as conn:
+            _upsert(conn, _ab_tests, "id", values)
+
+    def get_ab_test(self, ab_test_id: str) -> ABTest | None:
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                select(_ab_tests).where(_ab_tests.c.id == ab_test_id)
+            ).mappings().first()
+        return _payload(_ab_tests, ("status",), row, ABTest) if row else None
+
+    def list_ab_tests(
+        self,
+        *,
+        application_id: str | None = None,
+        status: str | None = None,
+    ) -> list[ABTest]:
+        conditions = []
+        if application_id is not None:
+            conditions.append(_ab_tests.c.application_id == application_id)
+        if status is not None:
+            conditions.append(_ab_tests.c.status == status)
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                select(_ab_tests).where(*conditions).order_by(_ab_tests.c.created_at)
+            ).mappings().all()
+        return [_payload(_ab_tests, ("status",), row, ABTest) for row in rows]
+
+    def save_assignment(self, assignment: ABAssignment) -> None:
+        values = {
+            "id": assignment.id,
+            "ab_test_id": assignment.ab_test_id,
+            "run_id": assignment.run_id,
+            "session_id": assignment.session_id,
+            "variant_key": assignment.variant_key,
+            "created_at": assignment.created_at,
+            "payload": dump(assignment),
+        }
+        with self.engine.begin() as conn:
+            _upsert(conn, _ab_assignments, "id", values)
+
+    def get_assignment_for_run(self, run_id: str) -> ABAssignment | None:
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                select(_ab_assignments).where(_ab_assignments.c.run_id == run_id)
+            ).mappings().first()
+        return _payload(_ab_assignments, (), row, ABAssignment) if row else None
+
+    def list_assignments_for_test(self, ab_test_id: str) -> list[ABAssignment]:
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                select(_ab_assignments)
+                .where(_ab_assignments.c.ab_test_id == ab_test_id)
+                .order_by(_ab_assignments.c.created_at)
+            ).mappings().all()
+        return [_payload(_ab_assignments, (), row, ABAssignment) for row in rows]
 
 
 # In-memory SQLite singletons (dispatch.orchestrator pattern): the API and

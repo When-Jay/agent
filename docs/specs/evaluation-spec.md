@@ -653,7 +653,15 @@ V2 实现边界（Second Stage，对齐 050-evaluation.md section 19）：
 * Online 部分先落地 **Production Sampling 信号消费**：Evaluation 通过
   RuntimeStore 消费生产 Run 的失败信号（RunFailed / ToolCallFailed /
   LLMFailed / NodeFailed）进入 Case Mining；不重复采集 Trace。
-* AB / Shadow / 巡检调度（Inspection Scheduling）为保留能力；Inspection
+* **AB 已实现（分流与度量）**：`ABTest`（variants + sampling_rate +
+  生命周期 DRAFT/RUNNING/PAUSED/COMPLETED）、sticky 分流
+  （`sha256(ab_test_id:session_id)` 派生入选与分桶随机数，同一会话
+  分配恒定）、逐 variant 结果聚合（完成/失败率、端到端时延）。
+  Assignment 是 run ↔ variant 绑定的度量事实，不改变执行路径；
+  variant 的 `agent_version` 为调用方标签——平台尚无 Agent 版本化
+  概念，执行侧行为切换为保留能力。同一 (application_id,
+  runtime_type) 同时只允许一个 RUNNING 实验。
+* Shadow / 巡检调度（Inspection Scheduling）为保留能力；Inspection
   复用离线 Run 对 INSPECTION asset 的执行，调度由后续 Phase 提供。
 
 ---
@@ -1028,6 +1036,14 @@ POST   /api/v1/evaluation/cases/{id}/diagnose  # 确定性归因 → DiagnosisRe
 GET    /api/v1/evaluation/cases/{id}/diagnoses # 归因历史
 POST   /api/v1/evaluation/cases/{id}/promote   # BAD case → Regression Task + REGRESSION asset
 POST   /api/v1/evaluation/cases/{id}/dismiss   # 误报/噪声处置
+
+# Online Evaluation mode=AB（分流与度量）
+POST   /api/v1/evaluation/ab-tests                       # 创建（DRAFT）
+GET    /api/v1/evaluation/ab-tests                       # list，支持 application_id/status 过滤
+GET    /api/v1/evaluation/ab-tests/{id}
+POST   /api/v1/evaluation/ab-tests/{id}/start|pause|complete
+POST   /api/v1/evaluation/ab-tests/{id}/assign           # 单 run 幂等分流
+GET    /api/v1/evaluation/ab-tests/{id}/report           # 逐 variant 结果聚合
 ```
 
 后续 Phase（reserved，spec 目标形态）：

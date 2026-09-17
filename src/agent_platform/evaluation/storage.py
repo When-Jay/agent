@@ -8,6 +8,8 @@ infrastructure layer (agent_platform.infrastructure.evaluation_sqlalchemy_store)
 from typing import Protocol, runtime_checkable
 
 from agent_platform.evaluation.domain import (
+    ABAssignment,
+    ABTest,
     Case,
     DiagnosisResult,
     EvaluationAsset,
@@ -85,6 +87,19 @@ class EvaluationStore(Protocol):
     def save_diagnosis(self, diagnosis: DiagnosisResult) -> None: ...
     def list_diagnoses_for_case(self, case_id: str) -> list[DiagnosisResult]: ...
 
+    # -- online evaluation: A/B tests (spec section 21) ---------------------------
+    def save_ab_test(self, test: ABTest) -> None: ...
+    def get_ab_test(self, ab_test_id: str) -> ABTest | None: ...
+    def list_ab_tests(
+        self,
+        *,
+        application_id: str | None = None,
+        status: str | None = None,
+    ) -> list[ABTest]: ...
+    def save_assignment(self, assignment: ABAssignment) -> None: ...
+    def get_assignment_for_run(self, run_id: str) -> ABAssignment | None: ...
+    def list_assignments_for_test(self, ab_test_id: str) -> list[ABAssignment]: ...
+
 
 class InMemoryEvaluationStore:
     """Dict-backed EvaluationStore (tests / local development)."""
@@ -104,6 +119,8 @@ class InMemoryEvaluationStore:
         self.cases: dict[str, Case] = {}
         self.diagnoses: dict[str, DiagnosisResult] = {}
         self.diagnoses_by_case: dict[str, list[str]] = {}
+        self.ab_tests: dict[str, ABTest] = {}
+        self.ab_assignments: dict[str, ABAssignment] = {}
 
     # -- tasks -----------------------------------------------------------------
     def save_task(self, task: Task) -> None:
@@ -242,3 +259,38 @@ class InMemoryEvaluationStore:
 
     def list_diagnoses_for_case(self, case_id: str) -> list[DiagnosisResult]:
         return [self.diagnoses[d] for d in self.diagnoses_by_case.get(case_id, [])]
+
+    # -- online evaluation: A/B ----------------------------------------------------
+    def save_ab_test(self, test: ABTest) -> None:
+        self.ab_tests[test.id] = test
+
+    def get_ab_test(self, ab_test_id: str) -> ABTest | None:
+        return self.ab_tests.get(ab_test_id)
+
+    def list_ab_tests(
+        self,
+        *,
+        application_id: str | None = None,
+        status: str | None = None,
+    ) -> list[ABTest]:
+        tests = self.ab_tests.values()
+        if application_id is not None:
+            tests = [t for t in tests if t.application_id == application_id]
+        if status is not None:
+            tests = [t for t in tests if t.status == status]
+        return list(tests)
+
+    def save_assignment(self, assignment: ABAssignment) -> None:
+        self.ab_assignments[assignment.id] = assignment
+
+    def get_assignment_for_run(self, run_id: str) -> ABAssignment | None:
+        return next(
+            (a for a in self.ab_assignments.values() if a.run_id == run_id), None
+        )
+
+    def list_assignments_for_test(self, ab_test_id: str) -> list[ABAssignment]:
+        return [
+            a
+            for a in self.ab_assignments.values()
+            if a.ab_test_id == ab_test_id
+        ]
