@@ -1,5 +1,17 @@
 """Evaluation domain models (05-evaluation-architecture.md, evaluation-spec.md)."""
 
+from agent_platform.evaluation.domain.case import (
+    CASE_DIAGNOSED,
+    CASE_DISMISSED,
+    CASE_OPEN,
+    CASE_PROMOTED,
+    Case,
+    CaseSource,
+    CaseType,
+    DiagnosisCategory,
+    DiagnosisResult,
+    RecommendedAction,
+)
 from agent_platform.evaluation.domain.gate import (
     GateAction,
     GateDecision,
@@ -37,6 +49,13 @@ __all__ = [
     "ASSET_GOLDEN",
     "ASSET_INSPECTION",
     "ASSET_REGRESSION",
+    "CASE_DIAGNOSED",
+    "CASE_DISMISSED",
+    "CASE_OPEN",
+    "CASE_PROMOTED",
+    "Case",
+    "CaseSource",
+    "CaseType",
     "Criterion",
     "EvaluationAsset",
     "EvaluationEnvironment",

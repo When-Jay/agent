@@ -7,11 +7,14 @@ RUNNING 由 worker 执行）——API 层不感知 celery/broker。
 
 from typing import Any, Callable
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from agent_platform.evaluation.application import EvaluationService
+from agent_platform.evaluation.cases import CaseService
+from agent_platform.evaluation.diagnosis import DiagnosisService
+from agent_platform.evaluation.domain import CaseSource, CaseType
 from agent_platform.errors import NotFoundError
 
 
@@ -78,8 +81,34 @@ class GateCheckRequest(BaseModel):
     run_id: str
 
 
+class CreateCaseRequest(BaseModel):
+    source: str = "USER_FEEDBACK"
+    type: str = "BAD"
+    task_id: str | None = None
+    trace_id: str = ""
+    input: dict[str, Any] = Field(default_factory=dict)
+    output: dict[str, Any] = Field(default_factory=dict)
+    expected_behavior: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class MineCasesRequest(BaseModel):
+    """Signal source selector: a production run or an evaluation run."""
+
+    run_id: str | None = None
+    evaluation_run_id: str | None = None
+
+
+class PromoteCaseRequest(BaseModel):
+    asset_name: str = "regression-set"
+
+
 def create_evaluation_router(
-    service: EvaluationService, *, run_dispatcher: Callable[[str], None]
+    service: EvaluationService,
+    *,
+    run_dispatcher: Callable[[str], None],
+    case_service: CaseService | None = None,
+    diagnosis_service: DiagnosisService | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/v1/evaluation", tags=["evaluation"])
 
@@ -164,7 +193,99 @@ def create_evaluation_router(
     def check_gate(request: GateCheckRequest) -> dict:
         return _dump(service.check_gate(request.gate_id, request.run_id))
 
+    # --- cases (spec section 32 Second Stage) -----------------------------------
+
+    @router.post("/cases", status_code=201)
+    def create_case(request: CreateCaseRequest) -> dict:
+        _require_case_service(case_service)
+        return _dump(
+            case_service.create_case(
+                source=CaseSource(request.source),
+                type=CaseType(request.type),
+                task_id=request.task_id,
+                trace_id=request.trace_id,
+                input=request.input,
+                output=request.output,
+                expected_behavior=request.expected_behavior,
+                metadata=request.metadata,
+            )
+        )
+
+    @router.get("/cases")
+    def list_cases(
+        type: str | None = None,
+        source: str | None = None,
+        status: str | None = None,
+    ) -> list[dict]:
+        _require_case_service(case_service)
+        return [
+            _dump(c)
+            for c in case_service.list_cases(
+                type=CaseType(type) if type else None,
+                source=CaseSource(source) if source else None,
+                status=status,
+            )
+        ]
+
+    @router.get("/cases/{case_id}")
+    def get_case(case_id: str) -> dict:
+        _require_case_service(case_service)
+        return _dump(case_service.get_case(case_id))
+
+    @router.post("/cases/mine")
+    def mine_cases(request: MineCasesRequest) -> dict:
+        """Mine cases from a production run or an evaluation run (spec section 23)."""
+        _require_case_service(case_service)
+        if request.evaluation_run_id:
+            mined = case_service.mine_evaluation_run(request.evaluation_run_id)
+        elif request.run_id:
+            mined = case_service.mine_run(request.run_id)
+            mined = [mined] if mined is not None else []
+        else:
+            raise HTTPException(
+                status_code=422, detail="run_id or evaluation_run_id is required"
+            )
+        return {"cases": [_dump(c) for c in mined]}
+
+    @router.post("/cases/{case_id}/diagnose")
+    def diagnose_case(case_id: str) -> dict:
+        _require_case_service(case_service)
+        _require_diagnosis_service(diagnosis_service)
+        return _dump(diagnosis_service.diagnose(case_id))
+
+    @router.get("/cases/{case_id}/diagnoses")
+    def list_case_diagnoses(case_id: str) -> list[dict]:
+        _require_case_service(case_service)
+        _require_diagnosis_service(diagnosis_service)
+        return [_dump(d) for d in diagnosis_service.list_diagnoses(case_id)]
+
+    @router.post("/cases/{case_id}/promote")
+    def promote_case(case_id: str, request: PromoteCaseRequest) -> dict:
+        """Promote a BAD case into the regression set (plan 050 Phase 9)."""
+        _require_case_service(case_service)
+        case, task, asset = case_service.promote_to_regression(
+            case_id, asset_name=request.asset_name
+        )
+        return {"case": _dump(case), "task": _dump(task), "asset": _dump(asset)}
+
+    @router.post("/cases/{case_id}/dismiss")
+    def dismiss_case(case_id: str) -> dict:
+        _require_case_service(case_service)
+        return _dump(case_service.dismiss_case(case_id))
+
     return router
+
+
+def _require_case_service(case_service: CaseService | None) -> CaseService:
+    if case_service is None:
+        raise RuntimeError("case service is not wired into the evaluation API")
+    return case_service
+
+
+def _require_diagnosis_service(diagnosis_service: DiagnosisService | None) -> DiagnosisService:
+    if diagnosis_service is None:
+        raise RuntimeError("diagnosis service is not wired into the evaluation API")
+    return diagnosis_service
 
 
 def _dump(value) -> dict:
@@ -174,7 +295,12 @@ def _dump(value) -> dict:
 
 
 def attach_evaluation_routes(
-    app, service: EvaluationService, *, run_dispatcher: Callable[[str], None]
+    app,
+    service: EvaluationService,
+    *,
+    run_dispatcher: Callable[[str], None],
+    case_service: CaseService | None = None,
+    diagnosis_service: DiagnosisService | None = None,
 ) -> None:
     """Mount evaluation routes; NotFoundError from evaluation handlers maps to 404.
 
@@ -182,7 +308,14 @@ def attach_evaluation_routes(
     fires for uncaught (evaluation) NotFoundErrors. run_dispatcher hands the
     created run to the dispatch layer (celery, injected by the composition root).
     """
-    app.include_router(create_evaluation_router(service, run_dispatcher=run_dispatcher))
+    app.include_router(
+        create_evaluation_router(
+            service,
+            run_dispatcher=run_dispatcher,
+            case_service=case_service,
+            diagnosis_service=diagnosis_service,
+        )
+    )
 
     @app.exception_handler(NotFoundError)
     async def _not_found_handler(request: Request, exc: NotFoundError):

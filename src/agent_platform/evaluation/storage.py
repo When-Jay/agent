@@ -8,6 +8,8 @@ infrastructure layer (agent_platform.infrastructure.evaluation_sqlalchemy_store)
 from typing import Protocol, runtime_checkable
 
 from agent_platform.evaluation.domain import (
+    Case,
+    DiagnosisResult,
     EvaluationAsset,
     EvaluationEnvironment,
     EvaluationResult,
@@ -67,6 +69,22 @@ class EvaluationStore(Protocol):
     def get_gate(self, gate_id: str) -> QualityGate | None: ...
     def list_gates(self) -> list[QualityGate]: ...
 
+    # -- cases (Second Stage: Online → Case → Diagnosis → Regression) -----------
+    def save_case(self, case: Case) -> None: ...
+    def get_case(self, case_id: str) -> Case | None: ...
+    def list_cases(
+        self,
+        *,
+        case_type: str | None = None,
+        source: str | None = None,
+        status: str | None = None,
+    ) -> list[Case]: ...
+    def find_case_by_trace(self, source: str, trace_id: str) -> Case | None: ...
+
+    # -- diagnoses ---------------------------------------------------------------
+    def save_diagnosis(self, diagnosis: DiagnosisResult) -> None: ...
+    def list_diagnoses_for_case(self, case_id: str) -> list[DiagnosisResult]: ...
+
 
 class InMemoryEvaluationStore:
     """Dict-backed EvaluationStore (tests / local development)."""
@@ -83,6 +101,9 @@ class InMemoryEvaluationStore:
         self.results: dict[str, EvaluationResult] = {}
         self.results_by_run: dict[str, list[str]] = {}
         self.gates: dict[str, QualityGate] = {}
+        self.cases: dict[str, Case] = {}
+        self.diagnoses: dict[str, DiagnosisResult] = {}
+        self.diagnoses_by_case: dict[str, list[str]] = {}
 
     # -- tasks -----------------------------------------------------------------
     def save_task(self, task: Task) -> None:
@@ -179,3 +200,45 @@ class InMemoryEvaluationStore:
 
     def list_gates(self) -> list[QualityGate]:
         return list(self.gates.values())
+
+    # -- cases -----------------------------------------------------------------
+    def save_case(self, case: Case) -> None:
+        self.cases[case.id] = case
+
+    def get_case(self, case_id: str) -> Case | None:
+        return self.cases.get(case_id)
+
+    def list_cases(
+        self,
+        *,
+        case_type: str | None = None,
+        source: str | None = None,
+        status: str | None = None,
+    ) -> list[Case]:
+        cases = self.cases.values()
+        if case_type is not None:
+            cases = [c for c in cases if c.type.value == case_type]
+        if source is not None:
+            cases = [c for c in cases if c.source.value == source]
+        if status is not None:
+            cases = [c for c in cases if c.status == status]
+        return list(cases)
+
+    def find_case_by_trace(self, source: str, trace_id: str) -> Case | None:
+        return next(
+            (
+                c
+                for c in self.cases.values()
+                if c.source.value == source and c.trace_id == trace_id
+            ),
+            None,
+        )
+
+    # -- diagnoses ---------------------------------------------------------------
+    def save_diagnosis(self, diagnosis: DiagnosisResult) -> None:
+        if diagnosis.id not in self.diagnoses:
+            self.diagnoses_by_case.setdefault(diagnosis.case_id, []).append(diagnosis.id)
+        self.diagnoses[diagnosis.id] = diagnosis
+
+    def list_diagnoses_for_case(self, case_id: str) -> list[DiagnosisResult]:
+        return [self.diagnoses[d] for d in self.diagnoses_by_case.get(case_id, [])]

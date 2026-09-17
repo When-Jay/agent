@@ -12,6 +12,8 @@ from typing import Any
 from sqlalchemy import JSON, Column, DateTime, Integer, MetaData, String, Table, insert, select
 
 from agent_platform.evaluation.domain import (
+    Case,
+    DiagnosisResult,
     EvaluationAsset,
     EvaluationEnvironment,
     EvaluationResult,
@@ -104,6 +106,26 @@ _gates = Table(
     Column("id", String(64), primary_key=True),
     Column("name", String(255), nullable=False),
     Column("version", String(32), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("payload", JSON, nullable=False),
+)
+_cases = Table(
+    "evaluation_cases", metadata,
+    Column("id", String(64), primary_key=True),
+    Column("source", String(32), nullable=False, index=True),
+    Column("type", String(32), nullable=False, index=True),
+    Column("status", String(32), nullable=False, index=True),
+    Column("task_id", String(64), nullable=True),
+    Column("trace_id", String(64), nullable=False, index=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("payload", JSON, nullable=False),
+)
+_diagnoses = Table(
+    "evaluation_diagnoses", metadata,
+    Column("seq", Integer, primary_key=True, autoincrement=True),
+    Column("id", String(64), nullable=False),
+    Column("case_id", String(64), nullable=False, index=True),
+    Column("category", String(32), nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("payload", JSON, nullable=False),
 )
@@ -316,6 +338,77 @@ class SQLEvaluationStore:
         with self.engine.connect() as conn:
             rows = conn.execute(select(_gates).order_by(_gates.c.created_at)).mappings().all()
         return [_payload(_gates, (), row, QualityGate) for row in rows]
+
+    # -- cases -----------------------------------------------------------------
+    def save_case(self, case: Case) -> None:
+        values = {
+            "id": case.id,
+            "source": case.source.value,
+            "type": case.type.value,
+            "status": case.status,
+            "task_id": case.task_id,
+            "trace_id": case.trace_id,
+            "created_at": case.created_at,
+            "payload": dump(case),
+        }
+        with self.engine.begin() as conn:
+            _upsert(conn, _cases, "id", values)
+
+    def get_case(self, case_id: str) -> Case | None:
+        with self.engine.connect() as conn:
+            row = conn.execute(select(_cases).where(_cases.c.id == case_id)).mappings().first()
+        return _payload(_cases, ("status",), row, Case) if row else None
+
+    def list_cases(
+        self,
+        *,
+        case_type: str | None = None,
+        source: str | None = None,
+        status: str | None = None,
+    ) -> list[Case]:
+        conditions = []
+        if case_type is not None:
+            conditions.append(_cases.c.type == case_type)
+        if source is not None:
+            conditions.append(_cases.c.source == source)
+        if status is not None:
+            conditions.append(_cases.c.status == status)
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                select(_cases).where(*conditions).order_by(_cases.c.created_at)
+            ).mappings().all()
+        return [_payload(_cases, ("status",), row, Case) for row in rows]
+
+    def find_case_by_trace(self, source: str, trace_id: str) -> Case | None:
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                select(_cases)
+                .where(_cases.c.source == source, _cases.c.trace_id == trace_id)
+                .order_by(_cases.c.created_at)
+            ).mappings().first()
+        return _payload(_cases, ("status",), row, Case) if row else None
+
+    # -- diagnoses ---------------------------------------------------------------
+    def save_diagnosis(self, diagnosis: DiagnosisResult) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(
+                insert(_diagnoses).values(
+                    id=diagnosis.id,
+                    case_id=diagnosis.case_id,
+                    category=diagnosis.category.value,
+                    created_at=diagnosis.created_at,
+                    payload=dump(diagnosis),
+                )
+            )
+
+    def list_diagnoses_for_case(self, case_id: str) -> list[DiagnosisResult]:
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                select(_diagnoses)
+                .where(_diagnoses.c.case_id == case_id)
+                .order_by(_diagnoses.c.seq)
+            ).mappings().all()
+        return [_payload(_diagnoses, (), row, DiagnosisResult) for row in rows]
 
 
 # In-memory SQLite singletons (dispatch.orchestrator pattern): the API and

@@ -648,6 +648,14 @@ SHADOW
 INSPECTION
 ```
 
+V2 实现边界（Second Stage，对齐 050-evaluation.md section 19）：
+
+* Online 部分先落地 **Production Sampling 信号消费**：Evaluation 通过
+  RuntimeStore 消费生产 Run 的失败信号（RunFailed / ToolCallFailed /
+  LLMFailed / NodeFailed）进入 Case Mining；不重复采集 Trace。
+* AB / Shadow / 巡检调度（Inspection Scheduling）为保留能力；Inspection
+  复用离线 Run 对 INSPECTION asset 的执行，调度由后续 Phase 提供。
+
 ---
 
 # 22. Monitoring Integration
@@ -706,6 +714,14 @@ Case Classification
 Attribution
 ```
 
+V2 实现边界：
+
+* 信号源已实现：生产 Run 失败信号（PRODUCTION_SAMPLE）、评测失败
+  Trial（EVALUATION）、人工反馈（USER_FEEDBACK）。
+* Deduplication 按 `(source, trace_id)` 幂等；Trace Enrichment 从
+  Runtime Run 回填 input/output；干净完成的 Run 不产 Case
+  （RANDOM_SAMPLE / MONITORING 信号源保留）。
+
 ---
 
 # 24. Diagnosis
@@ -735,6 +751,16 @@ EVAL_FIX
 ADD_COVERAGE
 HUMAN_REVIEW
 ```
+
+V2 实现边界（确定性归因规则，不使用 LLM）：
+
+* trace 缺失 → COVERAGE_GAP / HUMAN_REVIEW（section 18：Trace 不完整
+  不得强行判定）。
+* Run FAILED → AGENT_FAILURE / runtime；ToolCallFailed → tool；
+  LLMFailed → model；NodeFailed → workflow；均推荐 AGENT_FIX。
+* trace 完整但过程无失败信号（E2E 失败无法定位阶段）→ COVERAGE_GAP /
+  ADD_COVERAGE（plan 050 Phase 4 原则）。
+* EVALUATION_FAILURE 归因需要 Judge 校准证据（Phase 6），保留不产出。
 
 ---
 
@@ -991,16 +1017,23 @@ POST   /api/v1/evaluation/runs/{id}/cancel
 
 POST   /api/v1/evaluation/gates
 POST   /api/v1/evaluation/gates/check
+
+# Second Stage（050-evaluation.md section 19）：
+# Online → Case Mining → Diagnosis → Regression Set
+POST   /api/v1/evaluation/cases                # 人工提交（USER_FEEDBACK 等）
+GET    /api/v1/evaluation/cases                # list，支持 type/source/status 过滤
+GET    /api/v1/evaluation/cases/{id}
+POST   /api/v1/evaluation/cases/mine           # 挖掘生产 Run / 评测 Run 失败信号
+POST   /api/v1/evaluation/cases/{id}/diagnose  # 确定性归因 → DiagnosisResult
+GET    /api/v1/evaluation/cases/{id}/diagnoses # 归因历史
+POST   /api/v1/evaluation/cases/{id}/promote   # BAD case → Regression Task + REGRESSION asset
+POST   /api/v1/evaluation/cases/{id}/dismiss   # 误报/噪声处置
 ```
 
 后续 Phase（reserved，spec 目标形态）：
 
 ```text
 GET    /api/v1/evaluation/results/{id}
-
-POST   /api/v1/evaluation/cases
-GET    /api/v1/evaluation/cases/{id}
-POST   /api/v1/evaluation/cases/{id}/diagnose
 
 POST   /api/v1/evaluation/evaluators
 POST   /api/v1/evaluation/calibration
@@ -1032,6 +1065,10 @@ PostgreSQL
 ├── quality_gate
 └── version
 ```
+
+Second Stage 补充：`case` / `diagnosis` 表已实现
+（`evaluation_cases` / `evaluation_diagnoses`），Case 与 Runtime Run 通过
+`trace_id` 关联（与 Trial.trace_id 同一 trace 语义）。
 
 Langfuse：
 

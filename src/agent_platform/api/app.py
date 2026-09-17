@@ -24,6 +24,8 @@ from agent_platform.infrastructure.evolution_sqlalchemy_store import (
 )
 from agent_platform.evaluation.api import attach_evaluation_routes
 from agent_platform.evaluation.application import EvaluationService
+from agent_platform.evaluation.cases import CaseMiner, CaseService
+from agent_platform.evaluation.diagnosis import DiagnosisService
 from agent_platform.evolution.application import EvolutionService
 from agent_platform.evaluation.evaluators import (
     EvaluatorRegistry,
@@ -564,10 +566,20 @@ def create_app(
             registry=evaluation_registry,
         ),
     )
+    # Second Stage closed loop (050-evaluation.md section 19):
+    # Online signal → Case Mining → Diagnosis → Regression Set.
+    case_service = CaseService(
+        store,
+        evaluation_store,
+        miner=CaseMiner(store, evaluation_store),
+    )
+    diagnosis_service = DiagnosisService(store, evaluation_store)
     attach_evaluation_routes(
         app,
         evaluation_service,
         run_dispatcher=lambda run_id: enqueue_evaluation_run(celery, run_id),
+        case_service=case_service,
+        diagnosis_service=diagnosis_service,
     )
 
     # Evolution platform (060-evolution.md): candidate generation reuses the

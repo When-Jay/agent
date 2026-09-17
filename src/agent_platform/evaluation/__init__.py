@@ -6,8 +6,14 @@ never executes agents or workflows itself.
 """
 
 from agent_platform.evaluation.application import EvaluationService
+from agent_platform.evaluation.cases import CaseMiner, CaseService
+from agent_platform.evaluation.diagnosis import DiagnosisService
 from agent_platform.evaluation.domain import (
+    Case,
+    CaseSource,
+    CaseType,
     Criterion,
+    DiagnosisResult,
     EvaluationAsset,
     EvaluationEnvironment,
     EvaluationResult,
@@ -29,7 +35,14 @@ from agent_platform.evaluation.harness import TrialRunner
 from agent_platform.evaluation.storage import EvaluationStore, InMemoryEvaluationStore
 
 __all__ = [
+    "Case",
+    "CaseMiner",
+    "CaseService",
+    "CaseSource",
+    "CaseType",
     "Criterion",
+    "DiagnosisResult",
+    "DiagnosisService",
     "EvaluationAsset",
     "EvaluationContext",
     "EvaluationEnvironment",
