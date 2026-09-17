@@ -13,8 +13,18 @@ from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from agent_platform.config import Settings
+from agent_platform.evolution.api import attach_evolution_routes
+from agent_platform.evolution.experiment import (
+    EvaluationServiceGateway,
+    ExperimentRunner,
+)
+from agent_platform.evolution.optimizers import default_optimizers
+from agent_platform.infrastructure.evolution_sqlalchemy_store import (
+    create_evolution_store,
+)
 from agent_platform.evaluation.api import attach_evaluation_routes
 from agent_platform.evaluation.application import EvaluationService
+from agent_platform.evolution.application import EvolutionService
 from agent_platform.evaluation.evaluators import (
     EvaluatorRegistry,
     LLMJudgeEvaluator,
@@ -42,6 +52,7 @@ from agent_platform.runtime.core import (
 )
 from agent_platform.runtime.dispatch.celery_app import (
     create_celery_app,
+    enqueue_evolution_run,
     enqueue_evaluation_run,
     enqueue_resume,
     enqueue_run,
@@ -557,6 +568,26 @@ def create_app(
         app,
         evaluation_service,
         run_dispatcher=lambda run_id: enqueue_evaluation_run(celery, run_id),
+    )
+
+    # Evolution platform (060-evolution.md): candidate generation reuses the
+    # judge model port when one is configured; experiments consume Evaluation
+    # through the gateway (Evolution never re-implements the evaluation engine).
+    evolution_store = create_evolution_store(resolved_settings.database_url)
+    evolution_optimizers = {
+        optimizer.name: optimizer for optimizer in default_optimizers(judge_model)
+    }
+    evolution_service = EvolutionService(
+        evolution_store,
+        ExperimentRunner(
+            EvaluationServiceGateway(evaluation_service), evolution_store
+        ),
+        optimizers=evolution_optimizers,
+    )
+    attach_evolution_routes(
+        app,
+        evolution_service,
+        run_dispatcher=lambda run_id: enqueue_evolution_run(celery, run_id),
     )
 
     return app

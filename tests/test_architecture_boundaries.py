@@ -127,3 +127,49 @@ def test_mcp_module_stays_sdk_free():
                 offenders.append((path.relative_to(PROJECT_ROOT).as_posix(), imported))
 
     assert offenders == []
+
+
+def test_evolution_module_does_not_depend_on_execution_or_infrastructure():
+    # 060-evolution.md: Evolution consumes Evaluation through a stable
+    # gateway and never executes Agent/Workflow/tools or touches
+    # infrastructure directly (composition roots wire stores/dispatch).
+    forbidden_prefixes = (
+        "agent_platform.api",
+        "agent_platform.infrastructure",
+        "agent_platform.mcp",
+        "agent_platform.observability",
+        "agent_platform.sandbox",
+        "agent_platform.runtime.agent",
+        "agent_platform.runtime.workflow",
+        "agent_platform.runtime.dispatch",
+        "celery",
+        "langchain",
+        "langgraph",
+    )
+
+    offenders = []
+    for path in (SRC_ROOT / "evolution").rglob("*.py"):
+        for imported in _imports_for(path):
+            if imported.startswith(forbidden_prefixes):
+                offenders.append((path.relative_to(PROJECT_ROOT).as_posix(), imported))
+
+    assert offenders == []
+
+
+def test_evolution_domain_stays_self_contained():
+    # Evolution domain must not import other platform modules (mirrors the
+    # Runtime Core rule): only stdlib, keeping the aggregate shapes pure.
+    forbidden_prefixes = (
+        "agent_platform.evaluation",
+        "agent_platform.evolution.application",
+        "agent_platform.evolution.experiment",
+        "agent_platform.runtime",
+    )
+
+    offenders = []
+    for path in (SRC_ROOT / "evolution" / "domain").rglob("*.py"):
+        for imported in _imports_for(path):
+            if imported.startswith(forbidden_prefixes):
+                offenders.append((path.relative_to(PROJECT_ROOT).as_posix(), imported))
+
+    assert offenders == []

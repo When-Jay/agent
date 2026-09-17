@@ -12,6 +12,7 @@ from celery import Celery
 TASK_NAME = "agent_platform.runtime.dispatch.execute_run"
 RESUME_TASK_NAME = "agent_platform.runtime.dispatch.resume_run"
 EVALUATION_TASK_NAME = "agent_platform.evaluation.execute_evaluation_run"
+EVOLUTION_TASK_NAME = "agent_platform.evolution.execute_evolution_run"
 _TASKS_MODULE = "agent_platform.runtime.dispatch.tasks"
 
 
@@ -66,3 +67,18 @@ def enqueue_evaluation_run(app: Celery, evaluation_run_id: str) -> None:
         tasks.execute_evaluation_run.apply(args=[evaluation_run_id])
         return
     app.send_task(EVALUATION_TASK_NAME, args=[evaluation_run_id])
+
+
+def enqueue_evolution_run(app: Celery, evolution_run_id: str) -> None:
+    """Dispatch one evolution run for worker execution (plan 060).
+
+    Same enqueue-by-name contract as evaluation: the API process never
+    imports evolution/evaluation execution modules; eager mode runs
+    in-process for tests and local development.
+    """
+    if app.conf.task_always_eager:
+        from agent_platform.runtime.dispatch import tasks
+
+        tasks.execute_evolution_run.apply(args=[evolution_run_id])
+        return
+    app.send_task(EVOLUTION_TASK_NAME, args=[evolution_run_id])

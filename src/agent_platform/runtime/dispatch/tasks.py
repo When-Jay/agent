@@ -13,6 +13,7 @@ from typing import Any
 from agent_platform.config import Settings
 from agent_platform.runtime.dispatch.celery_app import (
     EVALUATION_TASK_NAME,
+    EVOLUTION_TASK_NAME,
     RESUME_TASK_NAME,
     TASK_NAME,
     create_celery_app,
@@ -144,6 +145,51 @@ def _export_evaluation_scores(evaluation_run_id: str) -> None:
         )
 
 
+_evolution_runner_builder: Callable[[], object] | None = None
+
+
+def set_evolution_runner_builder(builder: Callable[[], object]) -> None:
+    """Override evolution worker composition (tests / custom deployments)."""
+    global _evolution_runner_builder
+    _evolution_runner_builder = builder
+
+
+def _default_evolution_builder():
+    """Compose the worker-side EvolutionService (plan 060 section 22).
+
+    Mirrors the API composition root: experiments invoke Evaluation through
+    the gateway; candidate generation uses the same optional LLM port as
+    the judge evaluator (None -> generation-stage failure with a clear
+    error, never a silent empty candidate set).
+    """
+    from agent_platform.evolution.application import EvolutionService
+    from agent_platform.evolution.experiment import (
+        EvaluationServiceGateway,
+        ExperimentRunner,
+    )
+    from agent_platform.evolution.optimizers import default_optimizers
+    from agent_platform.infrastructure.evolution_sqlalchemy_store import (
+        create_evolution_store,
+    )
+
+    evolution_store = create_evolution_store(_settings.database_url)
+    optimizers = {o.name: o for o in default_optimizers(_evolution_model_fn())}
+    runner = ExperimentRunner(
+        EvaluationServiceGateway(_default_evaluation_builder()), evolution_store
+    )
+    return EvolutionService(evolution_store, runner, optimizers=optimizers)
+
+
+def _evolution_model_fn():
+    """Optional generation model port for candidate optimizers.
+
+    Deployments wire an LLM here (e.g. via set_evolution_runner_builder in
+    tests); without one, generation fails explicitly at the GENERATING
+    stage instead of producing silent no-op candidates.
+    """
+    return None
+
+
 @celery_app.task(name=EVALUATION_TASK_NAME)
 def execute_evaluation_run(evaluation_run_id: str) -> str:
     builder = _evaluation_runner_builder or _default_evaluation_builder
@@ -151,3 +197,11 @@ def execute_evaluation_run(evaluation_run_id: str) -> str:
     service.run_evaluation_run(evaluation_run_id)
     _export_evaluation_scores(evaluation_run_id)
     return evaluation_run_id
+
+
+@celery_app.task(name=EVOLUTION_TASK_NAME)
+def execute_evolution_run(evolution_run_id: str) -> str:
+    builder = _evolution_runner_builder or _default_evolution_builder
+    service = builder()
+    service.execute_run(evolution_run_id)
+    return evolution_run_id
