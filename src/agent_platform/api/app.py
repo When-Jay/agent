@@ -13,7 +13,16 @@ from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from agent_platform.config import Settings
+from agent_platform.evaluation.api import attach_evaluation_routes
+from agent_platform.evaluation.application import EvaluationService
+from agent_platform.evaluation.evaluators import (
+    EvaluatorRegistry,
+    LLMJudgeEvaluator,
+    RuleEvaluator,
+)
+from agent_platform.evaluation.harness import TrialRunner
 from agent_platform.errors import NotFoundError
+from agent_platform.infrastructure.evaluation_sqlalchemy_store import create_evaluation_store
 from agent_platform.logging import configure_logging
 from agent_platform.observability import get_metrics_collector
 from agent_platform.runtime.core import (
@@ -97,6 +106,7 @@ def create_app(
     *,
     stream_backend: StreamBackend | None = None,
     tool_capability=None,
+    judge_model=None,
 ) -> FastAPI:
     resolved_settings = settings or Settings()
     configure_logging(resolved_settings.log_level)
@@ -483,6 +493,26 @@ def create_app(
                 yield frame(event)
                 if is_terminal_event(data):
                     return
+
+    # Evaluation platform (05-evaluation-architecture.md): consumes runtime
+    # data through the standard dispatch path; the API is its composition
+    # root. Trials dispatch Runs like any other run (eager in tests/dev).
+    evaluation_store = create_evaluation_store(resolved_settings.database_url)
+    evaluation_registry = EvaluatorRegistry()
+    evaluation_registry.register(RuleEvaluator())
+    if judge_model is not None:
+        evaluation_registry.register(LLMJudgeEvaluator(judge_model))
+    evaluation_service = EvaluationService(
+        store,
+        evaluation_store,
+        TrialRunner(
+            store,
+            evaluation_store,
+            dispatcher=lambda run_id: enqueue_run(celery, run_id),
+            registry=evaluation_registry,
+        ),
+    )
+    attach_evaluation_routes(app, evaluation_service)
 
     return app
 
