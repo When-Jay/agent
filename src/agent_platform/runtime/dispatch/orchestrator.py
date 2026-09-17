@@ -14,7 +14,7 @@ import logging
 from typing import Any
 
 from agent_platform.config import Settings
-from agent_platform.runtime.agent import StoreCheckpointSaver
+from agent_platform.runtime.checkpointing import StoreCheckpointSaver
 from agent_platform.runtime.core import (
     EventBus,
     InMemoryRuntimeStore,
@@ -240,10 +240,20 @@ def build_agent_adapter(store: RuntimeStore, *, event_bus: EventBus):
 
 
 def build_workflow_runner(store: RuntimeStore):
-    """Compose the default WorkflowRunner (LangGraph engine) over Runtime Core."""
-    from agent_platform.runtime.workflow import WorkflowRunner
+    """Compose the default WorkflowRunner (LangGraph engine) over Runtime Core.
 
-    return WorkflowRunner(store)
+    Durable engine checkpoints ride on the store's own engine when one
+    exists (SQLAlchemy store), mirroring the agent adapter: HITL pauses
+    and failures resume across processes; in-memory stores keep the
+    per-run MemorySaver (in-process resume only).
+    """
+    from agent_platform.runtime.workflow import LangGraphWorkflowEngine, WorkflowRunner
+
+    engine = getattr(store, "engine", None)
+    langgraph_engine = (
+        LangGraphWorkflowEngine(StoreCheckpointSaver(engine)) if engine is not None else None
+    )
+    return WorkflowRunner(store, engine=langgraph_engine)
 
 
 def build_default_orchestrator(settings: Settings | None = None) -> RuntimeOrchestrator:

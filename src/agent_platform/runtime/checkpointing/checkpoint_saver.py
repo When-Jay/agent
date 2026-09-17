@@ -3,13 +3,13 @@
 LangGraph checkpoint payloads (channel values, versions, pending writes)
 are persisted to the platform database through dedicated tables — the
 "platform bridge that persists equivalent data" alternative to the
-LangGraph PostgreSQL checkpointer. The adapter receives the saver as its
-`checkpointer` argument; `thread_id == run_id`, so resume reattaches to
-the interrupted thread even from a fresh process.
+LangGraph PostgreSQL checkpointer. Agent and Workflow runtimes both pass
+the saver as the graph `checkpointer`; `thread_id == run_id`, so resume
+reattaches to the interrupted thread even from a fresh process.
 
 The saver receives a SQLAlchemy `Engine` built by the composition root
 (dispatch); this module imports sqlalchemy but never agent_platform.
-infrastructure, keeping the agent -> infra boundary intact.
+infrastructure, keeping the runtime -> infra boundary intact.
 """
 
 import asyncio
@@ -250,6 +250,12 @@ class StoreCheckpointSaver(BaseCheckpointSaver):
             }
             yield self.get_tuple(query)
 
+    def delete_thread(self, thread_id: str) -> None:
+        """Drop every checkpoint and write for a thread (fresh-start semantics)."""
+        with self.engine.begin() as conn:
+            conn.execute(delete(_checkpoints).where(_checkpoints.c.thread_id == thread_id))
+            conn.execute(delete(_writes).where(_writes.c.thread_id == thread_id))
+
     # -- async contract (agent execution is async; sync I/O off the loop) --------
 
     async def aget_tuple(self, config: dict[str, Any]) -> CheckpointTuple | None:
@@ -272,3 +278,6 @@ class StoreCheckpointSaver(BaseCheckpointSaver):
         task_path: str = "",
     ) -> None:
         await asyncio.to_thread(self.put_writes, config, writes, task_id, task_path)
+
+    async def adelete_thread(self, thread_id: str) -> None:
+        await asyncio.to_thread(self.delete_thread, thread_id)

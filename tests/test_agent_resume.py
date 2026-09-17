@@ -18,9 +18,10 @@ from sqlalchemy import create_engine
 from agent_platform.api.app import create_app
 from agent_platform.config import Settings
 from agent_platform.errors import InvalidStateTransitionError
-from agent_platform.runtime.agent import DeepAgentsRuntimeAdapter, StoreCheckpointSaver
+from agent_platform.runtime.agent import DeepAgentsRuntimeAdapter
 from agent_platform.runtime.capabilities.tool import ToolSpec
 from agent_platform.runtime.capabilities.tool_capability import InMemoryToolCapability
+from agent_platform.runtime.checkpointing import StoreCheckpointSaver
 from agent_platform.runtime.core import (
     EventBus,
     InMemoryRuntimeStore,

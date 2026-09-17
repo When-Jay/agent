@@ -2,13 +2,16 @@
 
 This is the ONLY module allowed to import LangGraph. It compiles the
 platform WorkflowDefinition into a LangGraph StateGraph and drives it
-superstep by superstep. Resume uses LangGraph's in-memory checkpointer
-keyed by run_id; durable resume arrives with the PostgreSQL adapters.
+superstep by superstep. Without a checkpointer each run gets an
+in-memory MemorySaver (in-process resume only); an injected durable
+checkpointer (StoreCheckpointSaver) reattaches interrupted threads
+across processes, keyed by run_id.
 """
 
 from collections.abc import Iterator
 from typing import Annotated, Any, TypedDict
 
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
@@ -31,9 +34,11 @@ class _EngineState(TypedDict, total=False):
 class LangGraphWorkflowEngine(WorkflowEngine):
     """Compiles WorkflowDefinitions to LangGraph and streams supersteps."""
 
-    def __init__(self) -> None:
+    def __init__(self, checkpointer: BaseCheckpointSaver | None = None) -> None:
         # run_id -> compiled graph + invocation config (in-process resume cache)
         self._runs: dict[str, tuple[Any, dict[str, Any]]] = {}
+        # None -> per-run MemorySaver; a durable saver enables cross-process resume.
+        self._checkpointer = checkpointer
 
     def start(
         self,
@@ -43,6 +48,12 @@ class LangGraphWorkflowEngine(WorkflowEngine):
         run_id: str,
         node_executor: NodeExecutor,
     ) -> Iterator[Superstep]:
+        # A start is always a fresh execution (first dispatch or retry):
+        # drop the cached graph and any durable thread left by an earlier
+        # attempt so stale channel values cannot leak into the new run.
+        self._runs.pop(run_id, None)
+        if self._checkpointer is not None:
+            self._checkpointer.delete_thread(run_id)
         compiled, config = self._compile(definition, node_executor, run_id)
         return self._stream(compiled, config, {"values": dict(state)})
 
@@ -79,7 +90,9 @@ class LangGraphWorkflowEngine(WorkflowEngine):
             if not definition.outgoing(node.name):
                 graph.add_edge(node.name, END)
 
-        compiled = graph.compile(checkpointer=MemorySaver())
+        compiled = graph.compile(
+            checkpointer=self._checkpointer if self._checkpointer is not None else MemorySaver()
+        )
         config = {"configurable": {"thread_id": run_id}}
         self._runs[run_id] = (compiled, config)
         return compiled, config
