@@ -113,3 +113,17 @@ def test_api_does_not_import_agent_or_workflow_execution_modules():
                 offenders.append((path.relative_to(PROJECT_ROOT).as_posix(), imported))
 
     assert offenders == []
+
+
+def test_mcp_module_stays_sdk_free():
+    # mcp-gateway-spec.md section 3: the official MCP SDK is used only by
+    # the composition root and tests; agent_platform/mcp/ speaks to
+    # sessions through its own duck-typed ports and never imports the
+    # SDK (the `mcp` or `mcp_types` distributions).
+    offenders = []
+    for path in (SRC_ROOT / "mcp").rglob("*.py"):
+        for imported in _imports_for(path):
+            if imported == "mcp" or imported.startswith("mcp."):
+                offenders.append((path.relative_to(PROJECT_ROOT).as_posix(), imported))
+
+    assert offenders == []

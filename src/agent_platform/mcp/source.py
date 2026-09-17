@@ -73,7 +73,14 @@ class SdkMcpToolSource:
             McpToolDescriptor(
                 name=tool.name,
                 description=getattr(tool, "description", None) or "",
-                input_schema=dict(getattr(tool, "inputSchema", None) or {}),
+                # mcp 2.x renamed wire fields to snake_case attributes
+                # (input_schema); older SDKs and other conforming sessions
+                # use the camelCase spelling.
+                input_schema=dict(
+                    getattr(tool, "input_schema", None)
+                    or getattr(tool, "inputSchema", None)
+                    or {}
+                ),
             )
             for tool in result.tools
         ]
@@ -83,7 +90,12 @@ class SdkMcpToolSource:
         text = "\n".join(
             block.text for block in (result.content or []) if hasattr(block, "text")
         )
-        if getattr(result, "isError", False):
+        # mcp 2.x: is_error; older SDKs: isError. None means the session
+        # does not expose the flag at all (treat as not failed).
+        is_error = getattr(result, "is_error", None)
+        if is_error is None:
+            is_error = getattr(result, "isError", False)
+        if is_error:
             raise McpToolCallError(text or f"tool {name} failed on server {self._name}")
         return text
 
