@@ -443,11 +443,19 @@ class SandboxSpec:
     network_policy: NetworkPolicy
 
     environment: dict[str, str]
+
+    ports: list[PortSpec]
 ```
 
 The specification is provider-independent.
 
 Docker and Kubernetes translate this specification into their own runtime configuration.
+
+`ports` declares inbound service ports (deny-by-default; see
+sandbox-spec.md sections 9.1-9.3). Providers publish declared ports to
+the platform network only and report resolved addresses on the Sandbox
+instance (`endpoints`); the motivating consumer is the MCP Gateway
+runner, which reaches a stdio server bridged to HTTP inside the sandbox.
 
 ---
 

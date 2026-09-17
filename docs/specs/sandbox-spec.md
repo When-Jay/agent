@@ -69,6 +69,7 @@ Sandbox
 ├── workspace
 ├── resources
 ├── network_policy
+├── endpoints
 ├── created_at
 └── last_heartbeat
 ```
@@ -121,6 +122,27 @@ ExecutionResult
 ├── truncated
 └── metadata
 ```
+
+---
+
+### 3.5 PortSpec / Endpoint
+
+Port exposure is deny-by-default (section 9.1).
+
+```text
+PortSpec
+├── name            # logical name, unique within a spec (e.g. "mcp")
+└── container_port  # TCP port the service listens on inside the sandbox
+
+Endpoint
+├── name            # matches the declared PortSpec.name
+└── address         # host:port reachable from the API/worker network
+```
+
+`PortSpec` is a creation-time declaration on `SandboxSpec` (`ports` list).
+`Endpoint` is the resolved address reported by the provider on the
+`Sandbox` instance (`endpoints` list). One `Endpoint` per declared
+`PortSpec`; the mapping rules are section 9.2.
 
 ---
 
@@ -261,6 +283,66 @@ INTERNET_ONLY
 The Sandbox must not automatically inherit access to the platform's private network.
 
 Network controls are enforced outside the Agent's reasoning layer.
+
+### 9.1 Declared Ports
+
+A Sandbox may declare inbound service ports so platform-side components
+can reach a service hosted inside the sandbox. The motivating consumer is
+the MCP Gateway runner (mcp-gateway-spec.md section 6.2): a stdio MCP
+server is bridged to Streamable HTTP inside the sandbox and reached over
+a declared port.
+
+```python
+SandboxSpec.ports: list[PortSpec]   # default: []
+```
+
+Rules:
+
+* Deny-by-default: a sandbox with no declared ports publishes nothing.
+* Declared ports require `network_policy.mode != NONE`; in NONE mode
+  nothing is reachable, so declaring ports there is a specification
+  error (PolicyValidator rejects it).
+* `name` must be unique within a spec; `container_port` must be a valid
+  TCP port.
+* Declarations are addressing metadata, not capability grants: the
+  platform never starts or supervises the service behind the port —
+  what listens is the image author's responsibility.
+* Declared ports are raw TCP endpoints. L7 routing, virtual hosts, and
+  TLS termination are out of scope (section 20).
+
+### 9.2 Endpoint Resolution
+
+Providers publish declared ports to the platform network and report the
+resolved addresses on the Sandbox instance:
+
+```python
+Sandbox.endpoints: list[Endpoint]   # one per declared PortSpec
+```
+
+Rules:
+
+* Providers MUST resolve every declared port during `create()`. A READY
+  sandbox with declared ports but missing endpoints is a provider bug.
+* Addresses must be reachable from the API/worker network and MUST NOT
+  be reachable from the public internet. Publishing to `0.0.0.0` is
+  prohibited: the docker provider binds host ports to the loopback
+  interface with an ephemeral host port; the k8s provider exposes a
+  ClusterIP Service (042-k8s-sandbox).
+* Endpoint values are infrastructure addressing, not secrets: they carry
+  no credentials, and authentication is the caller's responsibility (the
+  MCP Gateway injects credentials at session construction,
+  mcp-gateway-spec.md section 9.2).
+* Endpoints are not stable across recovery: a recreated sandbox receives
+  new addresses. Consumers must re-read endpoints from the Sandbox
+  instance and never cache them across sandbox instances.
+
+### 9.3 Service Health
+
+`health_check` keeps covering sandbox/container health (process, mount).
+Health of the service behind a declared port is the caller's concern —
+for MCP runners this is the MCP ping issued by the session holder
+(mcp-gateway-spec.md section 6.2). SandboxManager does not probe
+declared ports.
 
 ---
 
@@ -420,6 +502,11 @@ class SandboxProvider(Protocol):
         ...
 ```
 
+Endpoint handling is part of the provider contract, not SandboxManager
+logic: `create()` resolves endpoints for every declared port (section
+9.2) before the sandbox is reported READY, and `destroy()` removes the
+published ports with the sandbox.
+
 ---
 
 ## 15. Provider Selection
@@ -543,6 +630,7 @@ How much output?
 * [ ] Download file
 * [ ] Destroy Sandbox
 * [ ] Health check
+* [ ] Declared port endpoint resolved on create
 
 ### Isolation
 
@@ -551,6 +639,8 @@ How much output?
 * [ ] Cannot access unauthorized network
 * [ ] Cannot exceed resource limits
 * [ ] Cannot escape workspace boundary
+* [ ] Sandbox without declared ports publishes no ports
+* [ ] Declared ports unreachable from outside the platform network
 
 ### Reliability
 
@@ -559,6 +649,7 @@ How much output?
 * [ ] Sandbox failure can be detected
 * [ ] Sandbox can be recreated
 * [ ] Workspace survives Sandbox recreation
+* [ ] Recreated sandbox reports fresh endpoints
 
 ### Observability
 
@@ -582,5 +673,7 @@ The first version does not implement:
 * Automatic image construction
 * Advanced egress proxy
 * Malware scanning
+* L7 ingress, virtual-host routing, or TLS termination for declared
+  ports (ports are raw TCP endpoints; callers own the protocol)
 
 These are future extensions.

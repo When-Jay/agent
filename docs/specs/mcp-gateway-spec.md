@@ -113,14 +113,16 @@ as a sandbox workload:
    (MCP ping), destroyed on idle TTL or gateway shutdown. Destroy is
    best-effort and never blocks callers.
 
-### 6.3 Required sandbox contract extension
+### 6.3 Sandbox contract extension (specified)
 
-`SandboxSpec`/`SandboxInfo` currently have no port/endpoint exposure. The
-sandbox contract needs: declared ports on `SandboxSpec` and a reachable
-endpoint address on `SandboxInfo` (host:port reachable from the API/worker
-network). This is a cross-module change: it must be specified in
-sandbox-spec.md before implementation (change policy, section 9). The
-docker provider implements it first; the k8s provider follows 042-k8s-sandbox.
+The sandbox contract now defines port exposure (sandbox-spec.md sections
+9.1-9.3): deny-by-default declared ports on `SandboxSpec.ports` and
+resolved addresses on `Sandbox.endpoints` (host:port reachable from the
+API/worker network, never published publicly, re-read after recovery).
+The docker provider implements it for Stage D; the k8s provider follows
+042-k8s-sandbox. Runner images declare the sidecar port in their
+`SandboxSpec`; the composition root resolves the endpoint from the
+created Sandbox and connects the SDK session to it.
 
 ### 6.4 Secrets in runners
 
