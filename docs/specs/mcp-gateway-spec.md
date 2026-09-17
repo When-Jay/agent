@@ -88,10 +88,14 @@ Server declarations live in platform settings (platform-level catalog):
 
 ### 6.1 http / sse servers
 
-The composition root connects an official-SDK client session to `url`
-(Streamable HTTP preferred; SSE only for legacy servers) and hands it to
-`SdkMcpToolSource` (existing bridge, source.py). The bridge's background-
-loop design is retained.
+The composition root injects a **session factory** into `HttpMcpToolSource`
+(sessions.py): a context manager that connects the official-SDK client
+(transport + `ClientSession` + initialize) and yields the ready session.
+Amended per implementation finding: anyio cancel scopes are task-bound, so
+the session must be connected in ONE task on the holder's background loop —
+the holder runs the factory itself; pre-connected sessions handed across
+loops are unsupported. `SdkMcpToolSource` remains for already-connected
+in-process sessions (tests, in-memory servers).
 
 ### 6.2 stdio servers (runner model)
 
@@ -172,11 +176,15 @@ at the gateway layer.
   `resolve(ref, context) -> CredentialMaterial` where material is
   `{headers: {...}, env: {...}}` and `context` carries the requesting
   session/user identity for per-user delegation (OAuth tokens).
-* V2 adapter: settings/env-backed resolver (dev + self-hosted). Secret
-  manager backends are a reserved capability behind the same port.
+* V2-C status: the port and the env-backed adapter are implemented;
+  `context` (per-user identity) is RESERVED — `ToolCallRequest` does not
+  carry identity yet, so V2-C resolves platform identity only. Propagating
+  identity through requests is a follow-up change spanning the capability
+  contract and agent loop.
 * Session cache is keyed by `(server, credential fingerprint)`; per-user
   credentials produce per-identity sessions (bounded by `max_concurrency`
-  and idle TTL).
+  and idle TTL). The cache exists (`SessionPool`); identity propagation
+  is the remaining piece.
 
 ### 9.2 Injection points
 
@@ -216,15 +224,21 @@ gateway exception.
 
 ## 12. Connection Lifecycle
 
-Per `(server, credential identity)` session holder:
+Per `(server, credential identity)` session holder (implemented as
+`HttpMcpToolSource`):
 
 1. Connect lazily at first use (or at registration for tool listing).
-2. Health: MCP `ping` before reuse after idle > 30s; on failure, reconnect
-   with exponential backoff (max 3 attempts) then mark server unhealthy.
-3. Circuit breaker: after 5 consecutive dispatch failures the server opens
-   for a cooldown (default 30s); half-open single probe succeeds -> close.
+2. Health: MCP `ping` (SDK `send_ping`) before reuse after idle; on
+   failure, kill the connection and make ONE transparent reconnect per
+   call; further recovery is lazy — a failed connect arms a backoff gate
+   (default 2s) that refuses subsequent calls until it expires.
+3. Circuit breaker: consecutive transport failures (connect/call) open the
+   circuit after a threshold (default 5) for a cooldown (default 30s);
+   half-open single probe succeeds -> close. Server-reported failures
+   (`is_error` results) never count — the server is alive and answered.
 4. Concurrency cap per server (`max_concurrency`, default 8): excess calls
-   wait with the invocation timeout as the budget.
+   fail fast after `acquire_timeout` (10s default) instead of queueing
+   unboundedly.
 5. Cancellation: when the calling run is cancelled/paused, in-flight
    invocations receive cancellation through the existing middleware
    timeout budget; long-runner teardown is best-effort.
@@ -242,9 +256,9 @@ Per `(server, credential identity)` session holder:
 
 | Stage | Scope | Depends on |
 |-------|-------|------------|
-| A. SDK adoption | add `mcp` dependency; in-memory-transport integration test pinning bridge assumptions (list_tools/call_tool shapes, isError, _meta) | — |
-| B. Invocation hardening | namespacing, input validation, side_effects classes + retry policy, idempotency map, output truncation, audit redaction | — |
-| C. HTTP transport + credentials | official-SDK session holder (http/sse), CredentialResolver port + env adapter, session cache, circuit breaker, concurrency cap | A |
+| A. SDK adoption | add `mcp` dependency; in-memory-transport integration test pinning bridge assumptions (list_tools/call_tool shapes, isError, _meta) — DONE | — |
+| B. Invocation hardening | namespacing, input validation, side_effects classes + retry policy, idempotency map, output truncation, audit redaction — DONE | — |
+| C. HTTP transport + credentials | official-SDK session holder (http/sse), CredentialResolver port + env adapter, session cache, circuit breaker, concurrency cap, composition wiring — DONE (per-user identity propagation deferred, section 9.1) | A |
 | D. stdio isolation | sandbox port-exposure contract (sandbox-spec update), runner image contract, ServerRunner port + SandboxRunner adapter (docker provider), k8s later (042) | sandbox contract change |
 
 Each stage ships with unit tests and lands as an independent commit.

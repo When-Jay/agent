@@ -218,7 +218,9 @@ def _default_model_factory(model_spec: str):
     return init_chat_model(model_spec)
 
 
-def build_agent_adapter(store: RuntimeStore, *, event_bus: EventBus):
+def build_agent_adapter(
+    store: RuntimeStore, *, event_bus: EventBus, tool_capability=None
+):
     """Compose the default DeepAgents adapter over Runtime Core.
 
     Durable checkpoint payloads ride on the store's own engine when one
@@ -233,7 +235,7 @@ def build_agent_adapter(store: RuntimeStore, *, event_bus: EventBus):
     return DeepAgentsRuntimeAdapter(
         store,
         model_factory=_default_model_factory,
-        tool_capability=InMemoryToolCapability(),
+        tool_capability=tool_capability or InMemoryToolCapability(),
         event_bus=event_bus,
         checkpointer=checkpointer,
     )
@@ -263,7 +265,30 @@ def build_default_orchestrator(settings: Settings | None = None) -> RuntimeOrche
     events = EventBus(store)
     return RuntimeOrchestrator(
         store,
-        agent_adapter=build_agent_adapter(store, event_bus=events),
+        agent_adapter=build_agent_adapter(
+            store, event_bus=events, tool_capability=_build_tool_capability(settings)
+        ),
         workflow_runner=build_workflow_runner(store),
         event_bus=events,
     )
+
+
+def _build_tool_capability(settings: Settings):
+    """Native registry beside the MCP gateway when servers are configured."""
+    from agent_platform.runtime.capabilities.tool_capability import (
+        CompositeToolCapability,
+        InMemoryToolCapability,
+    )
+
+    native = InMemoryToolCapability()
+    if not settings.mcp_servers_json.strip():
+        return native
+    from agent_platform.mcp.credentials import EnvCredentialResolver
+    from agent_platform.runtime.dispatch.mcp_composition import (
+        build_mcp_gateway,
+        parse_mcp_servers_json,
+    )
+
+    servers = parse_mcp_servers_json(settings.mcp_servers_json)
+    gateway = build_mcp_gateway(servers, resolver=EnvCredentialResolver())
+    return CompositeToolCapability([native, gateway])

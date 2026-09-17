@@ -77,37 +77,13 @@ class SdkMcpToolSource:
 
     def list_tools(self) -> list[McpToolDescriptor]:
         result = self._call(self._session.list_tools())
-        return [
-            McpToolDescriptor(
-                name=tool.name,
-                description=getattr(tool, "description", None) or "",
-                # mcp 2.x renamed wire fields to snake_case attributes
-                # (input_schema); older SDKs and other conforming sessions
-                # use the camelCase spelling.
-                input_schema=dict(
-                    getattr(tool, "input_schema", None)
-                    or getattr(tool, "inputSchema", None)
-                    or {}
-                ),
-            )
-            for tool in result.tools
-        ]
+        return [descriptor_from_sdk_tool(tool) for tool in result.tools]
 
     def call_tool(
         self, name: str, arguments: dict[str, Any], *, meta: dict[str, Any] | None = None
     ) -> str:
         result = self._call(self._session.call_tool(name, arguments, meta=meta))
-        text = "\n".join(
-            block.text for block in (result.content or []) if hasattr(block, "text")
-        )
-        # mcp 2.x: is_error; older SDKs: isError. None means the session
-        # does not expose the flag at all (treat as not failed).
-        is_error = getattr(result, "is_error", None)
-        if is_error is None:
-            is_error = getattr(result, "isError", False)
-        if is_error:
-            raise McpToolCallError(text or f"tool {name} failed on server {self._name}")
-        return text
+        return text_from_sdk_result(result, tool_name=name, server_name=self._name)
 
     def close(self) -> None:
         """Stop the background loop; safe to call more than once."""
@@ -124,3 +100,37 @@ class SdkMcpToolSource:
 
     def _call(self, coro: Any) -> Any:
         return asyncio.run_coroutine_threadsafe(coro, self._loop).result()
+
+
+def descriptor_from_sdk_tool(tool: Any) -> McpToolDescriptor:
+    """Convert one SDK tool listing entry into the port descriptor.
+
+    mcp 2.x renamed wire fields to snake_case attributes (input_schema);
+    older SDKs and other conforming sessions use the camelCase spelling.
+    """
+    return McpToolDescriptor(
+        name=tool.name,
+        description=getattr(tool, "description", None) or "",
+        input_schema=dict(
+            getattr(tool, "input_schema", None)
+            or getattr(tool, "inputSchema", None)
+            or {}
+        ),
+    )
+
+
+def text_from_sdk_result(result: Any, *, tool_name: str, server_name: str) -> str:
+    """Convert a call result: joined text content, or McpToolCallError.
+
+    mcp 2.x: is_error; older SDKs: isError. None means the session does
+    not expose the flag at all (treat as not failed).
+    """
+    text = "\n".join(
+        block.text for block in (result.content or []) if hasattr(block, "text")
+    )
+    is_error = getattr(result, "is_error", None)
+    if is_error is None:
+        is_error = getattr(result, "isError", False)
+    if is_error:
+        raise McpToolCallError(text or f"tool {tool_name} failed on server {server_name}")
+    return text

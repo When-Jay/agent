@@ -35,6 +35,33 @@ class ToolCapability(ABC):
     # authorize (per-call policy check), cancel (in-flight cancellation).
 
 
+class CompositeToolCapability(ToolCapability):
+    """Chains multiple capabilities; lookup order follows registration order.
+
+    Composition-root concern: e.g. native in-process tools beside an MCP
+    gateway, without either knowing about the other.
+    """
+
+    def __init__(self, capabilities: list[ToolCapability]) -> None:
+        self._capabilities = capabilities
+
+    def list_tools(self) -> list[ToolSpec]:
+        specs: list[ToolSpec] = []
+        seen: set[str] = set()
+        for capability in self._capabilities:
+            for spec in capability.list_tools():
+                if spec.name not in seen:
+                    specs.append(spec)
+                    seen.add(spec.name)
+        return specs
+
+    def invoke(self, request: ToolCallRequest) -> ToolResult:
+        for capability in self._capabilities:
+            if capability.describe_tool(request.name) is not None:
+                return capability.invoke(request)
+        raise NotFoundError(f"tool not found: {request.name}")
+
+
 class InMemoryToolCapability(ToolCapability):
     """Minimal in-process tool registry (local development and tests)."""
 

@@ -23,3 +23,6 @@ class Settings:
     langfuse_host: str = field(
         default_factory=lambda: getenv("LANGFUSE_HOST", "https://cloud.langfuse.com")
     )
+    # MCP gateway server declarations (mcp-gateway-spec.md section 4):
+    # JSON array of {name, url, transport?, credential_ref?, side_effects?}.
+    mcp_servers_json: str = field(default_factory=lambda: getenv("MCP_SERVERS_JSON", ""))
