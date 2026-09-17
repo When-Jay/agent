@@ -276,6 +276,13 @@ EvaluationEnvironment:
 * Trial 必须记录 Environment Version。
 * Agent Version 与 Environment Version 必须同时进入 Evaluation Result。
 
+V1 实现边界（对齐 050-evaluation.md Phase 2）：
+
+* V1 的 Environment 是**版本化描述符**：`id / name / version / config`（其余字段
+  收敛进 `config` 记录，不做预置）。
+* Sandbox 预置、workspace 快照恢复、KB/MCP 版本固定、网络策略执行均为保留能力，
+  按后续 Phase 实现；在实现前这些字段仅作为元数据记录，不产生执行语义。
+
 ---
 
 # 10. Trial
@@ -305,6 +312,17 @@ TIMEOUT
 ERROR
 CANCELLED
 ```
+
+语义约定（V1 实现口径）：
+
+* `PASSED / FAILED` 是**评估裁决**：Runtime Run 达到终态并完成评估后得出；
+  FAILED Run 仍会执行评估以保留诊断证据（process assertions）。
+* `TIMEOUT / ERROR / CANCELLED` 是 **harness 级状态**：等待 Run 终态超时、
+  harness 派发异常、取消。
+* V1 中 Outcome 直接内嵌于 Trial（`outcome` 字段）；独立 Outcome 实体与
+  `outcome_id` 引用在结果规模需要时再拆分（reserved）。
+* `agent_version` 由调用方提供（平台尚无 Agent 版本化概念）；引入版本化后
+  改为自动记录。
 
 ---
 
@@ -943,40 +961,50 @@ Judge Version
 
 # 32. API
 
-核心 API：
+API 挂载在平台统一前缀下：`/api/v1/evaluation/...`。
+
+V1 已实现（050-evaluation.md Phase 0-3/5/10）：
 
 ```text
-POST   /evaluation/tasks
-GET    /evaluation/tasks/{id}
+POST   /api/v1/evaluation/tasks
+GET    /api/v1/evaluation/tasks
+GET    /api/v1/evaluation/tasks/{id}
 
-POST   /evaluation/suites
-GET    /evaluation/suites/{id}
+POST   /api/v1/evaluation/suites
+GET    /api/v1/evaluation/suites/{id}
 
-POST   /evaluation/runs
-GET    /evaluation/runs/{id}
+POST   /api/v1/evaluation/rubrics
+GET    /api/v1/evaluation/rubrics/{id}
 
-POST   /evaluation/runs/{id}/cancel
+POST   /api/v1/evaluation/assets
+GET    /api/v1/evaluation/assets
 
-GET    /evaluation/results
-GET    /evaluation/results/{id}
+POST   /api/v1/evaluation/environments
+GET    /api/v1/evaluation/environments/{id}
 
-POST   /evaluation/cases
-GET    /evaluation/cases/{id}
+POST   /api/v1/evaluation/runs          # V1 内联同步执行；异步派发为后续能力
+GET    /api/v1/evaluation/runs
+GET    /api/v1/evaluation/runs/{id}
+GET    /api/v1/evaluation/runs/{id}/results
+POST   /api/v1/evaluation/runs/{id}/cancel
 
-POST   /evaluation/cases/{id}/diagnose
+POST   /api/v1/evaluation/gates
+POST   /api/v1/evaluation/gates/check
+```
 
-POST   /evaluation/assets
-GET    /evaluation/assets
+后续 Phase（reserved，spec 目标形态）：
 
-POST   /evaluation/rubrics
-POST   /evaluation/evaluators
+```text
+GET    /api/v1/evaluation/results/{id}
 
-POST   /evaluation/calibration
+POST   /api/v1/evaluation/cases
+GET    /api/v1/evaluation/cases/{id}
+POST   /api/v1/evaluation/cases/{id}/diagnose
 
-GET    /evaluation/coverage
-GET    /evaluation/drift
-
-POST   /evaluation/gates/check
+POST   /api/v1/evaluation/evaluators
+POST   /api/v1/evaluation/calibration
+GET    /api/v1/evaluation/coverage
+GET    /api/v1/evaluation/drift
 ```
 
 ---
@@ -1024,6 +1052,14 @@ experiment_id
 ```
 
 关联。
+
+V1 集成边界：
+
+* Trace 关联已建立：`Trial.trace_id = Trial.run_id`（Runtime Run id），Langfuse
+  trace id = `UUID(run_id).hex`（deepagents-runtime-spec.md section 10），
+  Evaluation Result 可回查对应 Trace。
+* Score / Dataset / Experiment 的写入导出为保留能力（TODO），由独立的
+  observability 适配器实现，不进入 evaluation 执行路径。
 
 ---
 
