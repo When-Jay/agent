@@ -248,6 +248,48 @@ def test_agent_failed_run_resumes_from_durable_checkpoint(tmp_path):
     assert calls["launch"] == 1
 
 
+# --- retry: fresh start over a durable thread ---------------------------------------
+
+
+def test_agent_retry_starts_fresh_over_durable_thread(tmp_path):
+    store = InMemoryRuntimeStore()
+    calls: dict = {}
+    run = _make_run(store, agent_config={"tools": ["launch"]})
+    model = _FlakyOnceModel(
+        messages=iter([_launch_tool_call(), AIMessage("done")]), state=calls
+    )
+    database_path = tmp_path / "cp.db"
+
+    failing = DeepAgentsRuntimeAdapter(
+        store,
+        model_factory=lambda spec: model,
+        tool_capability=_launch_capability(calls),
+        checkpointer=StoreCheckpointSaver(create_engine(f"sqlite:///{database_path}")),
+    )
+    failed = asyncio.run(failing.run(run.id))
+    assert failed.status == "failed"
+
+    # Retry re-dispatches from scratch: messages from the failed attempt
+    # (already persisted under thread_id == run_id) must be cleared, not
+    # merged into the fresh execution by the add_messages reducer.
+    RunManager(store).requeue_run(run.id)
+    retried = DeepAgentsRuntimeAdapter(
+        store,
+        model_factory=lambda spec: model,
+        tool_capability=_launch_capability(calls),
+        checkpointer=StoreCheckpointSaver(create_engine(f"sqlite:///{database_path}")),
+    )
+    result = asyncio.run(retried.run(run.id))
+
+    assert result.status == "completed"
+    assert result.output["final"] == "done"
+    # Fresh thread replays the full flow exactly once:
+    # [Human, AI(tool_call), Tool, AI("done")] — a stale thread would
+    # carry the failed attempt's HumanMessage into the count (5).
+    assert result.output["message_count"] == 4
+    assert calls["launch"] == 1  # the tool ran in the clean retry flow
+
+
 # --- API respond ---------------------------------------------------------------------
 
 

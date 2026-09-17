@@ -97,6 +97,14 @@ class DeepAgentsRuntimeAdapter:
         if run.status not in {RunStatus.CREATED, RunStatus.QUEUED}:
             raise InvalidStateTransitionError(f"cannot start run from {run.status.value}")
 
+        # A start is always a fresh execution (first dispatch or retry):
+        # drop any durable thread left by an earlier attempt so the
+        # add_messages reducer cannot accumulate stale messages into the
+        # new run. Resume never clears — it reattaches to the interrupted
+        # thread (same fresh-start semantics as the workflow engine).
+        if self._checkpointer is not None:
+            await self._checkpointer.adelete_thread(run_id)
+
         self._runs.start_run(run_id)
         self._publish(run_id, RuntimeEventType.RUN_STARTED, {"runtime_type": run.runtime_type})
 
