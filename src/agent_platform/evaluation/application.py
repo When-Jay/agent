@@ -12,7 +12,7 @@ import logging
 import math
 from dataclasses import replace
 
-from agent_platform.errors import NotFoundError
+from agent_platform.errors import InvalidStateTransitionError, NotFoundError
 from agent_platform.evaluation.domain import (
     EvaluationAsset,
     EvaluationEnvironment,
@@ -177,7 +177,7 @@ class EvaluationService:
 
     # --- offline evaluation ------------------------------------------------------
 
-    def start_evaluation_run(
+    def create_evaluation_run(
         self,
         *,
         suite_id: str,
@@ -188,9 +188,10 @@ class EvaluationService:
         trials_per_task: int = 1,
         evaluator_ids: list[str] | None = None,
     ) -> EvaluationRun:
-        """Execute one offline evaluation run synchronously (V1: inline).
+        """Validate inputs and persist one evaluation run in RUNNING status.
 
-        异步执行（真实 broker 模式下由 dispatch 派发）为后续能力 TODO。
+        只创建不执行：执行由 run_evaluation_run 驱动（API 经 dispatch
+        派发到 worker，evaluation-spec.md section 32 异步派发）。
         """
         if runtime_type not in _VALID_RUNTIME_TYPES:
             raise ValueError(f"runtime_type must be one of {sorted(_VALID_RUNTIME_TYPES)}")
@@ -218,13 +219,32 @@ class EvaluationService:
             evaluator_ids=list(evaluator_ids or ["rule"]),
         )
         self._store.save_evaluation_run(run)
+        return run
 
-        rubrics = [self.get_rubric(r) for r in suite.rubric_ids]
+    def run_evaluation_run(self, run_id: str) -> EvaluationRun:
+        """Execute every trial of a persisted RUNNING evaluation run and finalize.
+
+        Worker 侧入口（dispatch task 调用）；同步驱动 trial 循环，
+        每个 Trial 的 Runtime Run 仍走标准 dispatch 路径。
+        """
+        run = self.get_evaluation_run(run_id)
+        if run.status is not EvaluationRunStatus.RUNNING:
+            if run.status is EvaluationRunStatus.CANCELLED:
+                # Cancelled between creation and execution (API cancel /
+                # another thread): graceful no-op, consistent with the
+                # between-trials cancellation check below.
+                run = replace(run, finished_at=utcnow())
+                self._store.save_evaluation_run(run)
+                return run
+            raise InvalidStateTransitionError(
+                f"cannot execute evaluation run from {run.status.value}"
+            )
+        rubrics = [self.get_rubric(r) for r in self.get_suite(run.suite_id).rubric_ids]
         try:
-            for task_id in suite.task_ids:
+            for task_id in self.get_suite(run.suite_id).task_ids:
                 task = self.get_task(task_id)
-                # Between-trials cancellation check (inline execution is
-                # synchronous; cancel from another thread takes effect here).
+                # Between-trials cancellation check (cancel from another
+                # thread/process takes effect at the next trial boundary).
                 current = self._store.get_evaluation_run(run.id)
                 if current is not None and current.status is EvaluationRunStatus.CANCELLED:
                     run = replace(current, finished_at=utcnow())
@@ -256,6 +276,29 @@ class EvaluationService:
         run = replace(run, summary=self.summarize(run.id))
         self._store.save_evaluation_run(run)
         return run
+
+    def start_evaluation_run(
+        self,
+        *,
+        suite_id: str,
+        application_id: str,
+        runtime_type: str = "agent",
+        agent_version: str = "dev",
+        environment_id: str | None = None,
+        trials_per_task: int = 1,
+        evaluator_ids: list[str] | None = None,
+    ) -> EvaluationRun:
+        """Create and synchronously execute one evaluation run (inline)."""
+        run = self.create_evaluation_run(
+            suite_id=suite_id,
+            application_id=application_id,
+            runtime_type=runtime_type,
+            agent_version=agent_version,
+            environment_id=environment_id,
+            trials_per_task=trials_per_task,
+            evaluator_ids=evaluator_ids,
+        )
+        return self.run_evaluation_run(run.id)
 
     def get_evaluation_run(self, run_id: str) -> EvaluationRun:
         return self._require(

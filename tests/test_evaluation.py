@@ -381,6 +381,9 @@ def test_evaluation_api_end_to_end(tmp_path):
             runtime_store, agent_adapter=StubAgentAdapter(runtime_store)
         )
     )
+    tasks.set_evaluation_runner_builder(
+        lambda: _evaluation_service_over(url, runtime_store)
+    )
     try:
         client = TestClient(
             create_app(Settings(database_url=url, celery_task_always_eager=True))
@@ -442,6 +445,7 @@ def test_evaluation_api_end_to_end(tmp_path):
         assert missing.status_code == 404
     finally:
         tasks.set_orchestrator_builder(None)
+        tasks.set_evaluation_runner_builder(None)
 
 
 def test_evaluation_api_asset_listing(tmp_path):
@@ -533,3 +537,27 @@ def _service_over(store, runtime_store=None) -> EvaluationService:
         registry=registry,
     )
     return EvaluationService(runtime_store, store, runner)
+
+
+def _evaluation_service_over(url: str, runtime_store) -> EvaluationService:
+    """Worker-side EvaluationService mirroring dispatch task composition.
+
+    Reuses the same runtime_store; the trial dispatcher enqueues Runtime
+    Runs through an eager celery app (in-process, no broker).
+    """
+    from agent_platform.runtime.dispatch.celery_app import create_celery_app, enqueue_run
+
+    evaluation_store = create_evaluation_store(url)
+    registry = EvaluatorRegistry()
+    registry.register(RuleEvaluator())
+    eager_celery = create_celery_app("redis://localhost:6379/0", eager=True)
+    return EvaluationService(
+        runtime_store,
+        evaluation_store,
+        TrialRunner(
+            runtime_store,
+            evaluation_store,
+            dispatcher=lambda run_id: enqueue_run(eager_celery, run_id),
+            registry=registry,
+        ),
+    )

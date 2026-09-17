@@ -982,7 +982,8 @@ GET    /api/v1/evaluation/assets
 POST   /api/v1/evaluation/environments
 GET    /api/v1/evaluation/environments/{id}
 
-POST   /api/v1/evaluation/runs          # V1 内联同步执行；异步派发为后续能力
+POST   /api/v1/evaluation/runs          # 创建并派发（dispatch worker 执行）；
+                                        # eager/dev 模式下内联执行完成
 GET    /api/v1/evaluation/runs
 GET    /api/v1/evaluation/runs/{id}
 GET    /api/v1/evaluation/runs/{id}/results
@@ -1058,8 +1059,19 @@ V1 集成边界：
 * Trace 关联已建立：`Trial.trace_id = Trial.run_id`（Runtime Run id），Langfuse
   trace id = `UUID(run_id).hex`（deepagents-runtime-spec.md section 10），
   Evaluation Result 可回查对应 Trace。
-* Score / Dataset / Experiment 的写入导出为保留能力（TODO），由独立的
-  observability 适配器实现，不进入 evaluation 执行路径。
+* Score 导出已实现（Phase 2）：`LangfuseScoreExporter`（observability 适配器）
+  在 evaluation run 结束后由 dispatch worker 调用，把 EvaluationResult 写为
+  对应 Trial trace 上的 Score；不进入 evaluation 执行路径。UNKNOWN/ERROR
+  结果不导出数值（section 18）。Dataset / Experiment 的写入导出仍为保留
+  能力（TODO）。
+
+异步派发（Phase 2）：
+
+* `POST /evaluation/runs` 只创建并派发；worker 侧 `execute_evaluation_run`
+  task 驱动 trial 循环（`EvaluationService.run_evaluation_run`），每个
+  Trial 的 Runtime Run 仍走标准 dispatch 路径。
+* eager/dev 模式下派发内联执行，API 返回终态 run；broker 模式下返回
+  RUNNING，summary 由 worker 完成后写入。
 
 ---
 

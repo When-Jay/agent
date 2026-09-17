@@ -1,10 +1,11 @@
 """Evaluation API routes (evaluation-spec.md section 32).
 
-V1 路径前缀对齐平台约定：/api/v1/evaluation/...。评测 Run 为内联同步执行
-（eager/dev 模式）；真实 broker 下的异步执行为后续能力。
+V1 路径前缀对齐平台约定：/api/v1/evaluation/...。评测 Run 经注入的
+run_dispatcher 派发（eager/dev 模式内联执行完成；broker 模式返回
+RUNNING 由 worker 执行）——API 层不感知 celery/broker。
 """
 
-from typing import Any
+from typing import Any, Callable
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -77,7 +78,9 @@ class GateCheckRequest(BaseModel):
     run_id: str
 
 
-def create_evaluation_router(service: EvaluationService) -> APIRouter:
+def create_evaluation_router(
+    service: EvaluationService, *, run_dispatcher: Callable[[str], None]
+) -> APIRouter:
     router = APIRouter(prefix="/api/v1/evaluation", tags=["evaluation"])
 
     @router.post("/tasks", status_code=201)
@@ -128,7 +131,14 @@ def create_evaluation_router(service: EvaluationService) -> APIRouter:
 
     @router.post("/runs", status_code=201)
     def start_evaluation_run(request: StartEvaluationRunRequest) -> dict:
-        return _dump(service.start_evaluation_run(**request.model_dump()))
+        """Create and dispatch an evaluation run (spec section 32).
+
+        eager 模式下 dispatcher 内联执行，返回终态 run；broker 模式下
+        返回 RUNNING，worker 完成执行与 summary 汇总。
+        """
+        run = service.create_evaluation_run(**request.model_dump())
+        run_dispatcher(run.id)
+        return _dump(service.get_evaluation_run(run.id))
 
     @router.get("/runs")
     def list_evaluation_runs(suite_id: str | None = None) -> list[dict]:
@@ -163,13 +173,16 @@ def _dump(value) -> dict:
     return dump(value)
 
 
-def attach_evaluation_routes(app, service: EvaluationService) -> None:
+def attach_evaluation_routes(
+    app, service: EvaluationService, *, run_dispatcher: Callable[[str], None]
+) -> None:
     """Mount evaluation routes; NotFoundError from evaluation handlers maps to 404.
 
     Existing app.py routes catch NotFoundError per-route, so this handler only
-    fires for uncaught (evaluation) NotFoundErrors.
+    fires for uncaught (evaluation) NotFoundErrors. run_dispatcher hands the
+    created run to the dispatch layer (celery, injected by the composition root).
     """
-    app.include_router(create_evaluation_router(service))
+    app.include_router(create_evaluation_router(service, run_dispatcher=run_dispatcher))
 
     @app.exception_handler(NotFoundError)
     async def _not_found_handler(request: Request, exc: NotFoundError):

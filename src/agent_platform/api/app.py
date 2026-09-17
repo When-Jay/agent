@@ -40,7 +40,12 @@ from agent_platform.runtime.core import (
     event_from_json,
     event_to_json,
 )
-from agent_platform.runtime.dispatch.celery_app import create_celery_app, enqueue_resume, enqueue_run
+from agent_platform.runtime.dispatch.celery_app import (
+    create_celery_app,
+    enqueue_evaluation_run,
+    enqueue_resume,
+    enqueue_run,
+)
 from agent_platform.runtime.dispatch.orchestrator import create_runtime_store
 from agent_platform.runtime.dispatch.redis_stream import (
     RedisEventPublisher,
@@ -512,7 +517,11 @@ def create_app(
             registry=evaluation_registry,
         ),
     )
-    attach_evaluation_routes(app, evaluation_service)
+    attach_evaluation_routes(
+        app,
+        evaluation_service,
+        run_dispatcher=lambda run_id: enqueue_evaluation_run(celery, run_id),
+    )
 
     return app
 

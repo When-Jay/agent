@@ -11,6 +11,7 @@ from celery import Celery
 
 TASK_NAME = "agent_platform.runtime.dispatch.execute_run"
 RESUME_TASK_NAME = "agent_platform.runtime.dispatch.resume_run"
+EVALUATION_TASK_NAME = "agent_platform.evaluation.execute_evaluation_run"
 _TASKS_MODULE = "agent_platform.runtime.dispatch.tasks"
 
 
@@ -50,3 +51,18 @@ def enqueue_resume(app: Celery, run_id: str, response: Any = None) -> None:
         tasks.resume_run.apply(args=[run_id, response])
         return
     app.send_task(RESUME_TASK_NAME, args=[run_id, response])
+
+
+def enqueue_evaluation_run(app: Celery, evaluation_run_id: str) -> None:
+    """Dispatch one evaluation run for worker execution (spec section 32).
+
+    The API only enqueues by name; evaluation composition happens on the
+    worker (same pattern as enqueue_run, so the API process never imports
+    evaluation execution modules).
+    """
+    if app.conf.task_always_eager:
+        from agent_platform.runtime.dispatch import tasks
+
+        tasks.execute_evaluation_run.apply(args=[evaluation_run_id])
+        return
+    app.send_task(EVALUATION_TASK_NAME, args=[evaluation_run_id])
