@@ -7,6 +7,7 @@ before every execution/file operation.
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 import posixpath
+import re
 
 from agent_platform.sandbox.errors import PermissionDenied, ResourceLimitExceeded
 from agent_platform.sandbox.models import ExecutionRequest, NetworkMode, SandboxSpec
@@ -78,6 +79,33 @@ class PolicyValidator:
             raise PermissionDenied(
                 f"network mode {spec.network_policy.mode.value} is not allowed"
             )
+        self._validate_ports(spec)
+
+    def _validate_ports(self, spec: SandboxSpec) -> None:
+        """Port exposure rules (sandbox-spec.md sections 9.1-9.2)."""
+        if not spec.ports:
+            return
+        if spec.network_policy.mode is NetworkMode.NONE:
+            # Nothing is reachable in NONE mode; declaring ports there is
+            # a specification error.
+            raise PermissionDenied(
+                "declared ports require a reachable network mode; NONE publishes nothing"
+            )
+        names: set[str] = set()
+        for port in spec.ports:
+            if not isinstance(port.container_port, int) or not 1 <= port.container_port <= 65535:
+                raise PermissionDenied(
+                    f"declared port {port.name!r} has invalid container_port "
+                    f"{port.container_port!r}"
+                )
+            if not port.name or not re.fullmatch(r"[a-z][a-z0-9-]{0,62}", port.name):
+                raise PermissionDenied(
+                    f"declared port name {port.name!r} must be a lowercase "
+                    "dns-style label ([a-z][a-z0-9-]*)"
+                )
+            if port.name in names:
+                raise PermissionDenied(f"declared port name is not unique: {port.name!r}")
+            names.add(port.name)
 
     def validate_execution(self, policy: SandboxPolicy, request: ExecutionRequest) -> None:
         if policy.max_timeout is not None and request.timeout > policy.max_timeout:

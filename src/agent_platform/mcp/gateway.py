@@ -90,6 +90,41 @@ class McpToolGateway(ToolCapability):
         self._idem_inflight: set[tuple[str, str, str]] = set()
         self._idem_recent: dict[tuple[str, str, str], float] = {}
 
+        self._close_lock = threading.Lock()
+        self._closed = False
+        self._close_callbacks: list[Callable[[], None]] = []
+
+    def on_close(self, callback: Callable[[], None]) -> None:
+        """Register a best-effort shutdown callback (pools, runners)."""
+        self._close_callbacks.append(callback)
+
+    def close(self) -> None:
+        """Best-effort shutdown: close registered sources, then callbacks.
+
+        Safe to call repeatedly; failures are logged, never raised.
+        """
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+        seen: set[int] = set()
+        for source, _local in list(self._mcp.values()):
+            if id(source) in seen:
+                continue
+            seen.add(id(source))
+            closer = getattr(source, "close", None)
+            if closer is None:
+                continue
+            try:
+                closer()
+            except Exception:  # noqa: BLE001 - shutdown is best-effort
+                logger.warning("source close failed for %s", source.name, exc_info=True)
+        for callback in self._close_callbacks:
+            try:
+                callback()
+            except Exception:  # noqa: BLE001 - shutdown is best-effort
+                logger.warning("gateway close callback failed", exc_info=True)
+
     # --- registration ---------------------------------------------------------
 
     def register_native(

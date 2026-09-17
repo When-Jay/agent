@@ -281,6 +281,46 @@ def _docker_spec(workspace_id: str = "ws-contract") -> SandboxSpec:
     return spec
 
 
+def _docker_spec_with_ports(workspace_id: str) -> SandboxSpec:
+    from agent_platform.sandbox.models import PortSpec
+
+    return _spec(
+        image=ALPINE,
+        workspace_id=workspace_id,
+        ports=(PortSpec(name="mcp", container_port=8080),),
+    )
+
+
+def test_container_config_publishes_declared_ports_loopback():
+    config = build_container_config(
+        _docker_spec_with_ports("ws-ports"), ".agent-platform/workspaces"
+    )
+    assert config["ports"] == {"8080/tcp": ("127.0.0.1", None)}
+
+
+def test_container_config_without_ports_publishes_nothing():
+    config = build_container_config(_docker_spec("ws-noports"), ".agent-platform/workspaces")
+    assert "ports" not in config
+
+
+def test_docker_create_resolves_endpoints_for_declared_ports(tmp_path):
+    _require_docker()
+
+    async def scenario():
+        manager = _docker_manager(tmp_path / "ws")
+        sandbox = await manager.create(_docker_spec_with_ports("ws-endpoints"))
+        assert sandbox.status.value == "ready"
+        assert len(sandbox.endpoints) == 1
+        endpoint = sandbox.endpoints[0]
+        assert endpoint.name == "mcp"
+        host, port = endpoint.address.split(":")
+        assert host == "127.0.0.1"
+        assert int(port) > 0
+        await manager.destroy(sandbox.sandbox_id)
+
+    asyncio.run(scenario())
+
+
 def _require_docker():
     if not _docker_available():
         pytest.skip("Docker daemon not available")

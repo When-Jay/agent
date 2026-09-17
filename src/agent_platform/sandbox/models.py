@@ -47,6 +47,32 @@ class WorkspaceMount:
 
 
 @dataclass(frozen=True)
+class PortSpec:
+    """One declared inbound service port (sandbox-spec.md sections 9.1-9.2).
+
+    Deny-by-default: only declared ports may be published to the
+    platform network. ``name`` is the logical endpoint name consumers
+    resolve on the Sandbox instance.
+    """
+
+    name: str
+    container_port: int
+
+
+@dataclass(frozen=True)
+class Endpoint:
+    """Resolved address for one declared port (sandbox-spec.md section 9.2).
+
+    ``address`` is ``host:port`` reachable from the API/worker network.
+    Values are addressing, not secrets; they change when a sandbox is
+    recreated, so consumers re-read them instead of caching.
+    """
+
+    name: str
+    address: str
+
+
+@dataclass(frozen=True)
 class SandboxSpec:
     """Creation request. sandbox_id is assigned by the SandboxManager."""
 
@@ -58,6 +84,7 @@ class SandboxSpec:
     network_policy: NetworkPolicy = field(default_factory=NetworkPolicy)
     workspace: WorkspaceMount = field(default_factory=lambda: WorkspaceMount(workspace_id=""))
     env: dict[str, str] = field(default_factory=dict)
+    ports: tuple[PortSpec, ...] = ()
     sandbox_id: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -79,6 +106,7 @@ class Sandbox:
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     last_heartbeat: datetime | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    endpoints: list[Endpoint] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

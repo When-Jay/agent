@@ -51,6 +51,7 @@ from agent_platform.sandbox.errors import (
     SandboxUnavailable,
 )
 from agent_platform.sandbox.models import (
+    Endpoint,
     ExecutionRequest,
     ExecutionResult,
     FileDownloadResult,
@@ -58,6 +59,7 @@ from agent_platform.sandbox.models import (
     FileUploadResult,
     HealthStatus,
     NetworkMode,
+    PortSpec,
     Sandbox,
     SandboxSpec,
     WorkspaceMount,
@@ -105,6 +107,45 @@ def network_mode_for(mode: NetworkMode) -> str:
     return "bridge"
 
 
+def published_ports(ports: tuple[PortSpec, ...]) -> dict[str, tuple[str, None]]:
+    """Loopback-bound ephemeral publish config for declared ports (spec 9.2).
+
+    ``("127.0.0.1", None)`` -> docker picks a free host port and binds it
+    to the loopback interface only; publishing to ``0.0.0.0`` is
+    prohibited. Undeclared ports are never published.
+    """
+    return {f"{port.container_port}/tcp": ("127.0.0.1", None) for port in ports}
+
+
+def resolve_endpoints(
+    ports: tuple[PortSpec, ...], network_ports: dict | None
+) -> list[Endpoint]:
+    """Map declared ports onto docker's NetworkSettings.Ports report.
+
+    A declared port without a resolved host binding is a provider bug
+    (spec section 9.2) and fails creation instead of yielding a READY
+    sandbox the platform cannot reach.
+    """
+    network_ports = network_ports or {}
+    endpoints: list[Endpoint] = []
+    for port in ports:
+        bindings = network_ports.get(f"{port.container_port}/tcp") or []
+        if not bindings:
+            raise ProviderError(
+                f"declared port {port.name!r} ({port.container_port}/tcp) "
+                "was not published by the docker daemon"
+            )
+        binding = bindings[0]
+        host_ip = binding.get("HostIp") or "127.0.0.1"
+        host_port = binding.get("HostPort")
+        if not host_port:
+            raise ProviderError(
+                f"declared port {port.name!r} has no resolved host port"
+            )
+        endpoints.append(Endpoint(name=port.name, address=f"{host_ip}:{host_port}"))
+    return endpoints
+
+
 def build_container_config(spec: SandboxSpec, workspace_root: str) -> dict:
     """Pure mapping SandboxSpec -> docker ``containers.run`` kwargs."""
     workspace = spec.workspace or WorkspaceMount(workspace_id="")
@@ -123,7 +164,7 @@ def build_container_config(spec: SandboxSpec, workspace_root: str) -> dict:
     read_only = bool(spec.metadata.get("read_only_rootfs", True))
     tmpfs_size = spec.metadata.get("tmpfs_size", "256m")
 
-    return {
+    config = {
         "name": container_name(spec.sandbox_id),
         "user": user,
         "privileged": False,
@@ -145,6 +186,9 @@ def build_container_config(spec: SandboxSpec, workspace_root: str) -> dict:
             f"{_LABEL_PREFIX}.managed": "true",
         },
     }
+    if spec.ports:
+        config["ports"] = published_ports(spec.ports)
+    return config
 
 
 def command_argv(command: str | list[str], timeout: float, wrapper_available: bool) -> list[str]:
@@ -291,7 +335,7 @@ class DockerSandboxProvider:
 
         container = await asyncio.to_thread(_run)
         logger.info("docker sandbox %s started as container %s", spec.sandbox_id, container.id[:12])
-        return Sandbox(
+        sandbox = Sandbox(
             sandbox_id=spec.sandbox_id,
             provider=self.provider_name,
             image=spec.image,
@@ -307,6 +351,14 @@ class DockerSandboxProvider:
                 "container_name": config["name"],
             },
         )
+        if spec.ports:
+            # Endpoint resolution is part of create() (spec section 9.2):
+            # a READY sandbox must carry an address per declared port.
+            await asyncio.to_thread(container.reload)
+            sandbox.endpoints = resolve_endpoints(
+                spec.ports, container.attrs.get("NetworkSettings", {}).get("Ports")
+            )
+        return sandbox
 
     async def execute(self, sandbox: Sandbox, request: ExecutionRequest) -> ExecutionResult:
         container = await asyncio.to_thread(self._get_container, sandbox)

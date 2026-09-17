@@ -17,7 +17,7 @@ import asyncio
 import threading
 import time
 from contextlib import AbstractAsyncContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
 from agent_platform.errors import PlatformError
@@ -62,13 +62,21 @@ class RemoteMcpSession(Protocol):
 
 @dataclass(frozen=True)
 class McpServerConfig:
-    """One MCP server declaration (spec section 4)."""
+    """One MCP server declaration (spec section 4).
+
+    ``streamable-http``/``sse`` servers carry ``url``; ``stdio`` servers
+    carry ``command`` (the stdio argv) plus non-sensitive ``env`` — they
+    run inside a sandbox workload reached over HTTP (spec section 6.2),
+    so their ``url`` is assigned by the runner, not declared here.
+    """
 
     name: str
-    url: str
-    transport: str = "streamable-http"  # "streamable-http" | "sse"
+    url: str = ""
+    transport: str = "streamable-http"  # "streamable-http" | "sse" | "stdio"
     credential_ref: str | None = None
     side_effects: str = "mutating"
+    command: tuple[str, ...] = ()
+    env: dict[str, str] = field(default_factory=dict)
 
 
 # Builds a READY session (transport + initialize) when entered; must run

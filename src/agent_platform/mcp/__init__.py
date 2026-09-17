@@ -16,6 +16,7 @@ from agent_platform.mcp.credentials import (
     credential_fingerprint,
 )
 from agent_platform.mcp.gateway import McpToolGateway, ToolRegistrationError, ToolTimeoutError
+from agent_platform.mcp.runner import RunnerUnavailableError, ServerRunner
 from agent_platform.mcp.sessions import (
     CircuitOpenError,
     HttpMcpToolSource,
@@ -50,7 +51,9 @@ __all__ = [
     "McpToolGateway",
     "McpToolSource",
     "ReconnectBackoffError",
+    "RunnerUnavailableError",
     "SdkMcpToolSource",
+    "ServerRunner",
     "SessionPool",
     "SessionUnavailableError",
     "ToolPermissionDeniedError",

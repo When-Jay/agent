@@ -95,8 +95,11 @@ def test_parse_mcp_servers_json():
     assert parse_mcp_servers_json("  ") == []
     with pytest.raises(ValueError, match="JSON array"):
         parse_mcp_servers_json('{"name": "x"}')
-    with pytest.raises(ValueError, match="name.*url"):
+    with pytest.raises(ValueError, match="name"):
         parse_mcp_servers_json('[{"url": "https://x"}]')
+    # http/sse without url -> error; stdio without command -> error.
+    with pytest.raises(ValueError, match="url"):
+        parse_mcp_servers_json('[{"name": "x", "transport": "sse"}]')
 
 
 def test_sdk_session_factory_rejects_unknown_transport():

@@ -3,7 +3,10 @@
 The official MCP SDK is a runtime dependency used ONLY here: this module
 builds ready sessions (transport + ClientSession + initialize) that
 session holders enter in one task on their own loop (task-bound anyio
-scopes — mcp/sessions.py stays SDK-free by design).
+scopes — mcp/sessions.py stays SDK-free by design). stdio servers are
+materialized as sandbox workloads through a ServerRunner (section 6.2)
+and reached over Streamable HTTP, so all transports converge on HTTP
+sessions.
 """
 
 import json
@@ -15,7 +18,14 @@ from agent_platform.config import Settings
 from agent_platform.mcp.audit import AuditSink
 from agent_platform.mcp.credentials import CredentialMaterial, CredentialResolver
 from agent_platform.mcp.gateway import McpToolGateway
-from agent_platform.mcp.sessions import McpServerConfig, SessionFactory, SessionPool
+from agent_platform.mcp.runner import ServerRunner
+from agent_platform.mcp.sessions import (
+    HttpMcpToolSource,
+    McpServerConfig,
+    SessionFactory,
+    SessionFactoryBuilder,
+    SessionPool,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +70,12 @@ def sdk_session_factory(transport: str) -> SessionFactory:
 
 
 def parse_mcp_servers_json(raw: str) -> list[McpServerConfig]:
-    """Parse the MCP_SERVERS_JSON setting into server configs (spec section 4)."""
+    """Parse the MCP_SERVERS_JSON setting into server configs (spec section 4).
+
+    ``streamable-http``/``sse`` entries need ``url``; ``stdio`` entries
+    need ``command`` (argv list; ``env`` carries non-sensitive config
+    only — credentials go by ``credential_ref``).
+    """
     text = (raw or "").strip()
     if not text:
         return []
@@ -69,18 +84,61 @@ def parse_mcp_servers_json(raw: str) -> list[McpServerConfig]:
         raise ValueError("MCP_SERVERS_JSON must be a JSON array of server objects")
     servers: list[McpServerConfig] = []
     for index, item in enumerate(data):
-        if not isinstance(item, dict) or not item.get("name") or not item.get("url"):
-            raise ValueError(f"MCP_SERVERS_JSON[{index}] must have 'name' and 'url'")
+        if not isinstance(item, dict) or not item.get("name"):
+            raise ValueError(f"MCP_SERVERS_JSON[{index}] must have a 'name'")
+        transport = str(item.get("transport", "streamable-http"))
+        url = str(item.get("url") or "")
+        command = tuple(str(part) for part in item.get("command") or ())
+        env = {str(key): str(value) for key, value in (item.get("env") or {}).items()}
+        if transport in ("streamable-http", "sse"):
+            if not url:
+                raise ValueError(f"MCP_SERVERS_JSON[{index}]: {transport} servers need 'url'")
+        elif transport == "stdio":
+            if not command:
+                raise ValueError(f"MCP_SERVERS_JSON[{index}]: stdio servers need 'command'")
+        else:
+            raise ValueError(
+                f"MCP_SERVERS_JSON[{index}]: unsupported transport {transport!r} "
+                "(expected 'streamable-http', 'sse' or 'stdio')"
+            )
         servers.append(
             McpServerConfig(
                 name=str(item["name"]),
-                url=str(item["url"]),
-                transport=str(item.get("transport", "streamable-http")),
+                url=url,
+                transport=transport,
                 credential_ref=item.get("credential_ref"),
                 side_effects=str(item.get("side_effects", "mutating")),
+                command=command,
+                env=env,
             )
         )
     return servers
+
+
+def runner_session_factory(
+    runner: ServerRunner,
+    config: McpServerConfig,
+    material: CredentialMaterial,
+    builder: SessionFactoryBuilder,
+) -> SessionFactory:
+    """Session factory for a runner-hosted stdio server (spec section 6.2).
+
+    The endpoint is resolved FRESH on every (re)connect — runner
+    workloads may be restarted or swept, and endpoints change across
+    recovery (sandbox-spec.md section 9.2). The bridge inside the sandbox
+    serves Streamable HTTP, so the platform connects with the plain
+    streamable-http transport. Credentials ride on the workload
+    environment (spec section 6.4), not on HTTP headers.
+    """
+    inner = builder("streamable-http")
+
+    @asynccontextmanager
+    async def factory(_url: str, headers: dict[str, str]) -> Any:
+        endpoint = runner.ensure_running(config, material)
+        async with inner(endpoint, headers) as session:
+            yield session
+
+    return factory
 
 
 def build_mcp_gateway(
@@ -90,10 +148,19 @@ def build_mcp_gateway(
     allowed_tools: set[str] | None = None,
     audit_sink: AuditSink | None = None,
     pool: SessionPool | None = None,
+    runner: ServerRunner | None = None,
+    factory_builder: SessionFactoryBuilder | None = None,
 ) -> McpToolGateway:
     """Compose the gateway from server configs: resolve credentials, share
-    holders per (server, credential fingerprint), register namespaced."""
-    pool = pool or SessionPool(builder=sdk_session_factory)
+    holders per (server, credential fingerprint), register namespaced.
+
+    stdio servers require ``runner`` (spec section 6.2) — the platform
+    never spawns stdio processes locally. Gateway shutdown closes the
+    sources, internally-owned pools and the runner's workloads.
+    """
+    internal_pool = pool is None
+    pool = pool or SessionPool(builder=factory_builder or sdk_session_factory)
+    builder = factory_builder or sdk_session_factory
     gateway = McpToolGateway(allowed_tools=allowed_tools, audit_sink=audit_sink)
     for config in servers:
         material = (
@@ -101,6 +168,23 @@ def build_mcp_gateway(
             if config.credential_ref and resolver is not None
             else CredentialMaterial()
         )
-        source = pool.get(config, material)
+        if config.transport == "stdio":
+            if runner is None:
+                raise ValueError(
+                    f"stdio server {config.name!r} requires a ServerRunner "
+                    "(no sandbox runner configured)"
+                )
+            source = HttpMcpToolSource(
+                name=config.name,
+                url=f"runner://{config.name}",
+                session_factory=runner_session_factory(runner, config, material, builder),
+            )
+        else:
+            source = pool.get(config, material)
         gateway.register_server(source, side_effects=config.side_effects)
+
+    if internal_pool:
+        gateway.on_close(pool.close_all)
+    if runner is not None:
+        gateway.on_close(runner.close)
     return gateway
