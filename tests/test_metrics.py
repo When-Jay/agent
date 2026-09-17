@@ -176,3 +176,67 @@ def test_api_metrics_endpoint_exposes_snapshot(tmp_path):
     assert body["runs"]["completed"] == 1
     assert body["runs"]["duration_seconds"]["avg"] == 1.0
     get_metrics_collector().reset()
+
+
+# --- Prometheus exposition ---------------------------------------------------------
+
+
+def test_prometheus_render_groups_metric_families():
+    collector = MetricsCollector()
+    bus = EventBus(InMemoryRuntimeStore())
+    collector.attach(bus)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    _publish(bus, RuntimeEventType.RUN_STARTED, "run-1", created_at=start)
+    _publish(
+        bus,
+        RuntimeEventType.RUN_COMPLETED,
+        "run-1",
+        created_at=start + timedelta(seconds=2),
+    )
+    _publish(
+        bus,
+        RuntimeEventType.LLM_COMPLETED,
+        "run-1",
+        {"model": "m", "input_tokens": 7, "output_tokens": 3},
+        created_at=start,
+    )
+    _publish(bus, RuntimeEventType.RUN_STARTED, "run-2", created_at=start)
+
+    text = collector.prometheus()
+
+    lines = text.splitlines()
+    # Each metric family declares HELP/TYPE exactly once.
+    names = [line.split(" ")[2] for line in lines if line.startswith("# TYPE")]
+    assert names == [
+        "agent_platform_events_total",
+        "agent_platform_run_duration_seconds_count",
+        "agent_platform_run_duration_seconds_max",
+        "agent_platform_llm_tokens_total",
+    ]
+
+    assert 'agent_platform_events_total{event="RunCompleted"} 1' in lines
+    assert 'agent_platform_events_total{event="RunStarted"} 2' in lines
+    assert "agent_platform_run_duration_seconds_count 1" in lines
+    assert "agent_platform_run_duration_seconds_max 2.0" in lines
+    assert 'agent_platform_llm_tokens_total{type="input"} 7' in lines
+    assert 'agent_platform_llm_tokens_total{type="output"} 3' in lines
+    assert text.endswith("\n")
+
+
+def test_api_metrics_prometheus_endpoint_returns_exposition(tmp_path):
+    get_metrics_collector().reset()
+    database_url = f"sqlite:///{tmp_path / 'api.db'}"
+    settings = Settings(database_url=database_url, celery_task_always_eager=True)
+    client = TestClient(create_app(settings))
+
+    bus = EventBus(create_runtime_store(database_url))
+    attach_metrics_collector(bus)
+    _publish(bus, RuntimeEventType.RUN_STARTED)
+    _publish(bus, RuntimeEventType.RUN_FAILED, payload={"error": "boom"})
+
+    response = client.get("/api/v1/metrics/prometheus")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/plain")
+    assert 'agent_platform_events_total{event="RunFailed"} 1' in response.text
+    get_metrics_collector().reset()

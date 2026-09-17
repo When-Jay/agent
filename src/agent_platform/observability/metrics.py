@@ -71,6 +71,63 @@ class MetricsCollector:
             self._tokens["input"] += int(payload.get("input_tokens") or 0)
             self._tokens["output"] += int(payload.get("output_tokens") or 0)
 
+    # -- export -------------------------------------------------------------------
+
+    def prometheus(self) -> str:
+        """Render the snapshot in Prometheus text exposition format (v0.0.4).
+
+        Hand-rolled so the platform carries no client dependency: all
+        event counters become one labeled series, run turnaround a
+        count/max pair, LLM tokens a typed counter. Process-local per
+        the module docstring; aggregation happens in the scraper.
+        """
+        snap = self.snapshot()
+        lines: list[str] = []
+
+        def family(name: str, help_text: str, samples: list[tuple[dict[str, str], Any]]) -> None:
+            lines.append(f"# HELP {name} {help_text}")
+            lines.append(f"# TYPE {name} counter")
+            for labels, value in samples:
+                label_str = ""
+                if labels:
+                    joined = ",".join(f'{key}="{val}"' for key, val in labels.items())
+                    label_str = "{" + joined + "}"
+                lines.append(f"{name}{label_str} {value}")
+
+        family(
+            "agent_platform_events_total",
+            "RuntimeEvents observed, by event type.",
+            [
+                ({"event": event_type}, count)
+                for event_type, count in sorted(snap["counters"].items())
+            ],
+        )
+
+        duration = snap["runs"]["duration_seconds"]
+        family(
+            "agent_platform_run_duration_seconds_count",
+            "Terminal runs observed with a measured turnaround.",
+            [({}, duration["count"])],
+        )
+        if duration["max"] is not None:
+            family(
+                "agent_platform_run_duration_seconds_max",
+                "Longest observed run turnaround in seconds.",
+                [({}, duration["max"])],
+            )
+
+        tokens = snap["llm"]
+        family(
+            "agent_platform_llm_tokens_total",
+            "LLM tokens observed, by direction.",
+            [
+                ({"type": "input"}, tokens["input_tokens"]),
+                ({"type": "output"}, tokens["output_tokens"]),
+            ],
+        )
+
+        return "\n".join(lines) + "\n"
+
     # -- snapshot ----------------------------------------------------------------
 
     def snapshot(self) -> dict[str, Any]:

@@ -7,7 +7,7 @@ workers. Request handlers import Runtime Core and dispatch wiring only
 
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
@@ -130,6 +130,14 @@ def create_app(
         architecture.md section 3). Process-local: reflects events published
         on buses this process subscribed the collector to."""
         return get_metrics_collector().snapshot()
+
+    @app.get("/api/v1/metrics/prometheus")
+    def get_metrics_prometheus() -> Response:
+        """Same snapshot rendered as Prometheus text exposition (v0.0.4)."""
+        body = get_metrics_collector().prometheus()
+        return Response(
+            content=body, media_type="text/plain; version=0.0.4; charset=utf-8"
+        )
 
     @app.post("/api/v1/runs", status_code=201)
     def create_run(request: CreateRunRequest) -> dict[str, Any]:
