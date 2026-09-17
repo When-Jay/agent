@@ -51,6 +51,17 @@ class RuntimeEventType(str, Enum):
     APPROVAL_REQUIRED = "ApprovalRequired"
     HUMAN_RESPONSE_RECEIVED = "HumanResponseReceived"
 
+    # Steering (budget-steering-spec.md section 35)
+    STEERING_RECEIVED = "SteeringReceived"
+    STEERING_INJECTED = "SteeringInjected"
+    STEERING_CONSUMED = "SteeringConsumed"
+
+    # Budget (budget-steering-spec.md section 35)
+    BUDGET_SOFT_LIMIT = "BudgetSoftLimit"
+    BUDGET_FINISHING = "BudgetFinishing"
+    BUDGET_HARD_LIMIT = "BudgetHardLimit"
+    BUDGET_EXHAUSTED = "BudgetExhausted"
+
     # Reserved (see runtime-spec.md section 8):
     # UserInputRequired.
 

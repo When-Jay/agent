@@ -219,13 +219,14 @@ def _default_model_factory(model_spec: str):
 
 
 def build_agent_adapter(
-    store: RuntimeStore, *, event_bus: EventBus, tool_capability=None
+    store: RuntimeStore, *, event_bus: EventBus, tool_capability=None, steering_channel=None
 ):
     """Compose the default DeepAgents adapter over Runtime Core.
 
     Durable checkpoint payloads ride on the store's own engine when one
     exists (SQLAlchemy store); in-memory stores get no checkpointer and
-    agent resume is unavailable there (spec section 8).
+    agent resume is unavailable there (spec section 8). The steering
+    channel enables the SteeringMiddleware stack (budget-steering-spec).
     """
     from agent_platform.runtime.agent import DeepAgentsRuntimeAdapter
     from agent_platform.runtime.capabilities.tool_capability import InMemoryToolCapability
@@ -238,6 +239,7 @@ def build_agent_adapter(
         tool_capability=tool_capability or InMemoryToolCapability(),
         event_bus=event_bus,
         checkpointer=checkpointer,
+        steering_channel=steering_channel,
     )
 
 
@@ -263,10 +265,15 @@ def build_default_orchestrator(settings: Settings | None = None) -> RuntimeOrche
     settings = settings or Settings()
     store = create_runtime_store(settings.database_url)
     events = EventBus(store)
+    from agent_platform.runtime.dispatch.redis_stream import create_steering_channel
+
     return RuntimeOrchestrator(
         store,
         agent_adapter=build_agent_adapter(
-            store, event_bus=events, tool_capability=_build_tool_capability(settings)
+            store,
+            event_bus=events,
+            tool_capability=_build_tool_capability(settings),
+            steering_channel=create_steering_channel(settings),
         ),
         workflow_runner=build_workflow_runner(store),
         event_bus=events,

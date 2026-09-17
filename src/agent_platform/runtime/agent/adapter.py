@@ -5,8 +5,15 @@ adapter loads the Run from Runtime Core, assembles a DeepAgents agent
 (model, tools, middleware, backend, checkpointer), delegates execution
 to `create_deep_agent()` / LangGraph, and maps the result back to
 platform Run state, events and checkpoints.
+
+Runtime Control (budget-steering-spec.md): the adapter wires the
+Steering/Budget middleware stack and acts as the loop-level watchdog —
+`asyncio.wait_for` enforces the budget's max_time hard cap so hung
+model/tool calls cannot stall a run indefinitely (middleware cannot
+observe a hang; spec section 26).
 """
 
+import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -25,10 +32,12 @@ from agent_platform.runtime.agent.middleware import (
     BudgetMiddleware,
     HumanApprovalMiddleware,
     RuntimeEventMiddleware,
+    SteeringMiddleware,
     ToolPermissionMiddleware,
 )
 from agent_platform.runtime.agent.tools import LangChainToolAdapter
 from agent_platform.runtime.capabilities.budget import BudgetCapability, BudgetSpec
+from agent_platform.runtime.capabilities.steering import SteeringChannel
 from agent_platform.runtime.capabilities.tool_capability import ToolCapability
 from agent_platform.runtime.core import (
     ArtifactStore,
@@ -73,6 +82,7 @@ class DeepAgentsRuntimeAdapter:
         sandbox_manager: SandboxManager | None = None,
         checkpointer: BaseCheckpointSaver | None = None,
         budget_factory: BudgetFactory | None = None,
+        steering_channel: SteeringChannel | None = None,
         extra_middleware: tuple = (),
         default_sandbox_image: str = "platform/agent:latest",
         event_bus: EventBus | None = None,
@@ -89,6 +99,7 @@ class DeepAgentsRuntimeAdapter:
         self._sandbox_manager = sandbox_manager
         self._checkpointer = checkpointer
         self._budget_factory = budget_factory or self._default_budget
+        self._steering_channel = steering_channel
         self._extra_middleware = tuple(extra_middleware)
         self._default_sandbox_image = default_sandbox_image
 
@@ -141,6 +152,7 @@ class DeepAgentsRuntimeAdapter:
     async def _drive(self, run, agent_input: Any, *, reason: str) -> AgentRunResult:
         run_id = run.id
         config = self._agent_config(run)
+        budget = self._budget_factory(config.get("budget"))
         sandbox = None
         try:
             sandbox = await self._create_sandbox(run, config)
@@ -154,7 +166,7 @@ class DeepAgentsRuntimeAdapter:
                 if sandbox is not None
                 else None
             )
-            middleware = self._build_middleware(run_id, config)
+            middleware = self._build_middleware(run_id, config, budget)
             agent = create_deep_agent(
                 model=self._model_factory(config.get("model", "default")),
                 tools=LangChainToolAdapter(self._tool_capability).adapt(config.get("tools")),
@@ -164,10 +176,20 @@ class DeepAgentsRuntimeAdapter:
                 checkpointer=self._checkpointer,
             )
 
-            state = await agent.ainvoke(
-                agent_input,
-                config={"configurable": {"thread_id": run_id}},
-            )
+            # Watchdog (budget-steering-spec.md section 26): middleware hooks
+            # cannot observe a hung model/tool call, so the loop-level hard
+            # cap (budget max_time) is enforced here, outside the agent loop.
+            budget_timeout = budget.timeout_seconds() if budget is not None else None
+            try:
+                state = await asyncio.wait_for(
+                    agent.ainvoke(
+                        agent_input,
+                        config={"configurable": {"thread_id": run_id}},
+                    ),
+                    timeout=budget_timeout,
+                )
+            except asyncio.TimeoutError:
+                raise BudgetExceededError("time") from None
             return await self._finish_or_pause(agent, run_id, state)
         except BudgetExceededError as exc:
             # Budget is a governance stop, not an execution bug: record and
@@ -237,18 +259,24 @@ class DeepAgentsRuntimeAdapter:
         )
         return await self._sandbox_manager.create(spec)
 
-    def _build_middleware(self, run_id: str, config: dict[str, Any]) -> list:
+    def _build_middleware(self, run_id: str, config: dict[str, Any], budget) -> list:
         def emit(event_type: RuntimeEventType, payload: dict[str, Any]) -> None:
             self._events.publish(run_id=run_id, event_type=event_type, payload=payload)
 
         allowed_tools = config.get("tools")
-        budget = self._budget_factory(config.get("budget"))
         middleware: list = [
             RuntimeEventMiddleware(emit=emit),
             ToolPermissionMiddleware(allowed_tools),
-            BudgetMiddleware(budget),
-            *self._extra_middleware,
         ]
+        # Runtime control stack order (budget-steering-spec.md section 29):
+        # steering first, then budget, so both notices reach the same
+        # model call when they coincide (spec section 33).
+        if self._steering_channel is not None:
+            middleware.append(
+                SteeringMiddleware(self._steering_channel, run_id, emit=emit)
+            )
+        middleware.append(BudgetMiddleware(budget, emit=emit))
+        middleware.extend(self._extra_middleware)
         # HITL policy (deepagents-runtime-spec section 5): {"tool": [decisions]}
         # pauses the run before that tool executes; the decision arrives via
         # POST /runs/{id}/respond and adapter.resume().
@@ -267,6 +295,11 @@ class DeepAgentsRuntimeAdapter:
                 max_tokens=limits.get("max_tokens"),
                 max_cost=limits.get("max_cost"),
                 max_tool_calls=limits.get("max_tool_calls"),
+                max_time_ms=limits.get("max_time_ms"),
+                max_turns=limits.get("max_turns"),
+                soft_ratio=limits.get("soft_ratio", 0.8),
+                grace_time_ms=limits.get("grace_time_ms", 60_000),
+                max_final_turns=limits.get("max_final_turns", 1),
             )
         )
 

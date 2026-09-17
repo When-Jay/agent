@@ -15,6 +15,7 @@ import logging
 import threading
 import time
 from typing import Protocol
+from uuid import uuid4
 
 from agent_platform.config import Settings
 from agent_platform.runtime.core.events import RuntimeEvent, event_to_json
@@ -126,3 +127,86 @@ def create_stream_backend(settings: Settings) -> StreamBackend:
     if settings.redis_event_fanout_enabled:
         return RedisStreamBackend(settings.redis_url)
     return InMemoryStreamBackend()
+
+
+# --- steering channel (budget-steering-spec.md sections 6/36/37) ----------------
+
+STEERING_KEY_PREFIX = "agent_platform:steering"
+
+
+def _steering_key(run_id: str) -> str:
+    return f"{STEERING_KEY_PREFIX}:{run_id}"
+
+
+def _steering_json(message) -> str:
+    payload = {
+        "id": message.id,
+        "run_id": message.run_id,
+        "message": message.message,
+        "created_at": message.created_at.isoformat(),
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+class RedisSteeringChannel:
+    """Redis List steering queue: per-run key isolation + consume-once ack.
+
+    ``pending`` peeks (LRANGE); ``acknowledge`` removes consumed entries
+    (LREM by exact payload) — consume-after-successful-injection
+    (budget-steering-spec.md section 36).
+    """
+
+    def __init__(self, redis_url: str) -> None:
+        import redis
+
+        self._client = redis.Redis.from_url(redis_url, decode_responses=True)
+
+    def publish(self, run_id: str, message: str):
+        from agent_platform.runtime.capabilities.steering import SteeringMessage
+
+        msg = SteeringMessage(id=str(uuid4()), run_id=run_id, message=message)
+        self._client.rpush(_steering_key(run_id), _steering_json(msg))
+        return msg
+
+    def pending(self, run_id: str) -> list:
+        from agent_platform.runtime.capabilities.steering import SteeringMessage
+        from datetime import datetime
+
+        raw = self._client.lrange(_steering_key(run_id), 0, -1)
+        messages = []
+        for entry in raw:
+            data = json.loads(entry)
+            messages.append(
+                SteeringMessage(
+                    id=data["id"],
+                    run_id=data["run_id"],
+                    message=data["message"],
+                    created_at=datetime.fromisoformat(data["created_at"]),
+                )
+            )
+        return messages
+
+    def acknowledge(self, run_id: str, steering_ids: list[str]) -> None:
+        if not steering_ids:
+            return
+        key = _steering_key(run_id)
+        consumed = set(steering_ids)
+        raw = self._client.lrange(key, 0, -1)
+        for entry in raw:
+            try:
+                if json.loads(entry).get("id") in consumed:
+                    self._client.lrem(key, 1, entry)
+            except json.JSONDecodeError:
+                continue
+
+
+def create_steering_channel(settings: Settings):
+    """Compose the steering channel: Redis when fanout is enabled, else in-memory.
+
+    API 和 worker 必须使用同一 settings 判定，才能共享 per-run 队列。
+    """
+    if settings.redis_event_fanout_enabled:
+        return RedisSteeringChannel(settings.redis_url)
+    from agent_platform.runtime.capabilities.steering import InMemorySteeringChannel
+
+    return InMemorySteeringChannel()

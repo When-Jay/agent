@@ -96,7 +96,9 @@ Platform features should be implemented as LangChain / DeepAgents middleware:
 
 ```text
 PolicyMiddleware
-BudgetMiddleware
+BudgetMiddleware            (budget-steering-spec.md: multi-dimensional
+                             time/token/turn budgets; soft limit -> FINISHING
+                             notice, hard limit -> BudgetExceededError)
 RuntimeEventMiddleware
 LangfuseMiddleware
 HumanApprovalMiddleware
@@ -104,9 +106,17 @@ ToolPermissionMiddleware
 ModelRoutingMiddleware
 MemoryMiddleware
 SkillMiddleware
+SteeringMiddleware          (budget-steering-spec.md: merges pending user
+                             steering messages into one System Notice before
+                             the next model call; consume-after-success)
 ```
 
 Middleware may read platform configuration and write RuntimeEvents, but must not import API request handlers.
+
+Budget hard limits set inside middleware cannot observe a hung LLM/tool call;
+the agent adapter additionally enforces a watchdog timeout around the agent
+loop derived from the budget's max-time hard limit (budget-steering-spec.md
+section 26).
 
 ---
 

@@ -51,6 +51,7 @@ from agent_platform.runtime.dispatch.redis_stream import (
     RedisEventPublisher,
     StreamBackend,
     create_stream_backend,
+    create_steering_channel,
     is_terminal_event,
 )
 
@@ -75,6 +76,12 @@ class CreateRunRequest(BaseModel):
 
 class RespondRunRequest(BaseModel):
     response: Any = None
+
+
+class SteerRunRequest(BaseModel):
+    """Runtime steering instruction (budget-steering-spec.md section 4)."""
+
+    message: str
 
 
 class CreateApplicationRequest(BaseModel):
@@ -130,6 +137,9 @@ def create_app(
     # enabled, workers publish to Redis and the API reads the same stream.
     resolved_backend = stream_backend or create_stream_backend(resolved_settings)
     events.subscribe(RedisEventPublisher(resolved_backend))
+    # Per-run steering queue (budget-steering-spec.md section 6): same
+    # settings gate as the worker, so API and worker share the channel.
+    steering = create_steering_channel(resolved_settings)
 
     @app.get("/api/v1/health")
     def health() -> dict[str, str]:
@@ -226,6 +236,32 @@ def create_app(
         runs.requeue_run(run_id)
         enqueue_run(celery, run_id)
         return _run_payload(runs.get_run(run_id))
+
+    @app.post("/api/v1/runs/{run_id}/steer", status_code=202)
+    def steer_run(run_id: str, request: SteerRunRequest) -> dict[str, Any]:
+        """Queue a steering instruction for a RUNNING agent run
+        (budget-steering-spec.md section 4).
+
+        Steering is a control signal, not a message turn: the running
+        worker consumes it before the next model decision. The current
+        tool is not interrupted.
+        """
+        try:
+            run = runs.get_run(run_id)
+        except NotFoundError:
+            raise HTTPException(status_code=404, detail=f"run not found: {run_id}") from None
+        if run.status is not RunStatus.RUNNING:
+            raise HTTPException(
+                status_code=409,
+                detail=f"run {run_id} cannot be steered from status {run.status.value}",
+            )
+        message = steering.publish(run_id, request.message)
+        events.publish(
+            run_id=run_id,
+            event_type=RuntimeEventType.STEERING_RECEIVED,
+            payload={"steering_id": message.id, "message": request.message},
+        )
+        return {"run_id": run_id, "steering_id": message.id, "status": run.status.value}
 
     @app.post("/api/v1/runs/{run_id}/resume")
     def resume_run(run_id: str) -> dict[str, Any]:
