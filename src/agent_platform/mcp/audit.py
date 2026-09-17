@@ -14,15 +14,21 @@ from typing import Protocol
 
 @dataclass(frozen=True)
 class AuditEntry:
-    """One recorded gateway action."""
+    """One recorded gateway action.
+
+    Redaction rules (mcp-gateway-spec.md section 9.3): arguments are
+    recorded as byte size and SHA-256 digest only — never as values.
+    """
 
     timestamp: datetime
     action: str  # "register" | "invoke"
     tool: str
     server: str | None = None  # None for native tools
-    outcome: str = "ok"  # "ok" | "error" | "timeout" | "denied" | "not_found"
+    outcome: str = "ok"  # "ok" | "error" | "timeout" | "denied" | "not_found" | "invalid" | "duplicate"
     duration_ms: float | None = None
     error: str | None = None
+    arguments_bytes: int | None = None
+    arguments_digest: str | None = None
 
 
 class AuditSink(Protocol):

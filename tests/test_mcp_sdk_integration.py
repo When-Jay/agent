@@ -60,8 +60,8 @@ class _DeferredSession:
     async def list_tools(self) -> Any:
         return await self._holder["session"].list_tools()
 
-    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
-        return await self._holder["session"].call_tool(name, arguments)
+    async def call_tool(self, name: str, arguments: dict[str, Any], *, meta: dict[str, Any] | None = None) -> Any:
+        return await self._holder["session"].call_tool(name, arguments, meta=meta)
 
 
 @contextmanager

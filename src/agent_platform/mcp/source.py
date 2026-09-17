@@ -35,15 +35,23 @@ class McpToolSource(Protocol):
 
     def list_tools(self) -> list[McpToolDescriptor]: ...
 
-    def call_tool(self, name: str, arguments: dict[str, Any]) -> str: ...
+    def call_tool(
+        self, name: str, arguments: dict[str, Any], *, meta: dict[str, Any] | None = None
+    ) -> str: ...
 
 
 class AsyncMcpSession(Protocol):
-    """The subset of an MCP SDK ClientSession the bridge needs."""
+    """The subset of an MCP SDK ClientSession the bridge needs.
+
+    ``meta`` rides into the request's ``_meta`` (spec section 7.3): the
+    gateway passes the idempotency key for every logical invocation.
+    """
 
     async def list_tools(self) -> Any: ...
 
-    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any: ...
+    async def call_tool(
+        self, name: str, arguments: dict[str, Any], *, meta: dict[str, Any] | None = None
+    ) -> Any: ...
 
 
 class SdkMcpToolSource:
@@ -85,8 +93,10 @@ class SdkMcpToolSource:
             for tool in result.tools
         ]
 
-    def call_tool(self, name: str, arguments: dict[str, Any]) -> str:
-        result = self._call(self._session.call_tool(name, arguments))
+    def call_tool(
+        self, name: str, arguments: dict[str, Any], *, meta: dict[str, Any] | None = None
+    ) -> str:
+        result = self._call(self._session.call_tool(name, arguments, meta=meta))
         text = "\n".join(
             block.text for block in (result.content or []) if hasattr(block, "text")
         )
