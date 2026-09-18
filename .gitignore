@@ -7,5 +7,6 @@ venv/
 dist/
 build/
 node_modules/
+**/node_modules/
 .env
 .runner_test.log
