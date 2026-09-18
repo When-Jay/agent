@@ -1,0 +1,90 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: agent
+      POSTGRES_PASSWORD: agent
+      POSTGRES_DB: agent_platform
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent -d agent_platform"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      # 宿主机 6379 落在 Windows 保留端口段(6368-6467)，映射到 16379；
+      # 容器内仍是 6379，服务间连接不受影响。
+      - "16379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: .
+    environment: &runtime_env
+      DATABASE_URL: postgresql+psycopg2://agent:agent@postgres:5432/agent_platform
+      REDIS_URL: redis://redis:6379/0
+      # 多进程部署必须开启：API 的 SSE 订阅 worker 发布的事件流，
+      # steering 队列也靠同一开关共享（redis_stream.create_steering_channel）。
+      REDIS_EVENT_FANOUT_ENABLED: "1"
+      CELERY_TASK_ALWAYS_EAGER: "0"
+      LOG_LEVEL: INFO
+      # 模型密钥按需透传；在 application metadata 配置 model 后才会用到
+      # （"provider:model-name" 由 langchain init_chat_model 解析）。
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health', timeout=3)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    # 需要 docker sandbox 执行工具时取消注释：
+    # volumes:
+    #   - /var/run/docker.sock:/var/run/docker.sock
+
+  worker:
+    build: .
+    command: >
+      celery -A agent_platform.runtime.dispatch.tasks.celery_app worker
+      --loglevel=INFO --concurrency=2
+    environment: *runtime_env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # volumes: 同 api，按需挂载 docker.sock
+
+  web:
+    build: ./web
+    ports:
+      - "3000:80"
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

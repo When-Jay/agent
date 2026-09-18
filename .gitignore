@@ -6,5 +6,6 @@ venv/
 *.egg-info/
 dist/
 build/
+node_modules/
 .env
 .runner_test.log

@@ -8,6 +8,7 @@ dependencies = [
     "fastapi",
     "pydantic",
     "sqlalchemy",
+    "psycopg2-binary",
     "redis",
     "uvicorn",
     "langgraph",
