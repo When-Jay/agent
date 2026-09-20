@@ -11,7 +11,9 @@ V2 确定性规则（不使用 LLM，spec section 20 原则）按证据强度归
 6. trace 完整且干净          → COVERAGE_GAP / process → ADD_COVERAGE
    （E2E 失败但过程无失败信号：缺过程评测覆盖，plan Phase 4 原则）
 
-EVALUATION_FAILURE 归因需要 Judge 校准证据（Phase 6），此处不产出。
+0. case.source is EVALUATION 且 Trial 有 error 无评分结果
+   → EVALUATION_FAILURE / harness → EVAL_FIX（评测设施自身失败，
+   plan-productionization G3；有评分但失败的评测信号落入上述规则 1-6）。
 """
 
 import logging
@@ -22,6 +24,7 @@ from agent_platform.evaluation.domain import (
     CASE_DIAGNOSED,
     CASE_PROMOTED,
     Case,
+    CaseSource,
     DiagnosisCategory,
     DiagnosisResult,
     RecommendedAction,
@@ -83,6 +86,21 @@ class DiagnosisService:
     # --- attribution rules ---------------------------------------------------
 
     def _attribute(self, case: Case) -> DiagnosisResult:
+        harness_failure = (
+            self._evaluation_harness_failure(case)
+            if case.source is CaseSource.EVALUATION
+            else None
+        )
+        if harness_failure is not None:
+            return DiagnosisResult(
+                case_id=case.id,
+                category=DiagnosisCategory.EVALUATION_FAILURE,
+                component="harness",
+                evidence=[harness_failure],
+                confidence=0.9,
+                recommended_action=RecommendedAction.EVAL_FIX,
+            )
+
         run = (
             self._runtime_store.get_run(case.trace_id) if case.trace_id else None
         )
@@ -143,6 +161,40 @@ class DiagnosisService:
             confidence=0.4,
             recommended_action=RecommendedAction.ADD_COVERAGE,
         )
+
+    def _evaluation_harness_failure(self, case: Case) -> dict | None:
+        """Harness-level failure evidence for an EVALUATION-source case, or None.
+
+        Mining evidence 携带 trial_id（cases.py mine_evaluation_run）：
+        Trial.outcome 有 error 且该 Trial 无任何 Evaluator 评分结果 →
+        harness/评测设施自身失败，不是 Agent 失败；有评分结果（Agent
+        已执行且被判定失败）→ 返回 None，落入现有生产归因规则。
+        """
+        trial_id = next(
+            (
+                item.get("trial_id")
+                for item in case.evidence
+                if isinstance(item, dict) and item.get("trial_id")
+            ),
+            None,
+        )
+        if not trial_id:
+            return None
+        trial = self._store.get_trial(trial_id)
+        if trial is None or not trial.outcome.get("error"):
+            return None
+        scored = any(
+            result.trial_id == trial_id
+            for result in self._store.list_results_for_run(trial.evaluation_run_id)
+        )
+        if scored:
+            return None
+        return {
+            "trial_id": trial.id,
+            "evaluation_run_id": trial.evaluation_run_id,
+            "trial_status": trial.status.value,
+            "error": trial.outcome.get("error"),
+        }
 
     def _require_case(self, case_id: str) -> None:
         if self._store.get_case(case_id) is None:

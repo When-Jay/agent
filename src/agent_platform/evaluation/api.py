@@ -20,7 +20,7 @@ from agent_platform.evaluation.domain import (
     CaseType,
 )
 from agent_platform.evaluation.online import OnlineEvaluationService
-from agent_platform.errors import NotFoundError
+from agent_platform.errors import InvalidStateTransitionError, NotFoundError
 
 
 class CreateTaskRequest(BaseModel):
@@ -104,6 +104,20 @@ class MineCasesRequest(BaseModel):
     evaluation_run_id: str | None = None
 
 
+class MineRandomSampleRequest(BaseModel):
+    """Random-sample mining batch size (spec section 23 RANDOM_SAMPLE)."""
+
+    limit: int = Field(default=10, ge=1, le=100)
+
+
+class MineMonitoringRequest(BaseModel):
+    """External monitoring alert mining (spec section 23 MONITORING)."""
+
+    run_id: str
+    reason: str
+    monitor_ref: str = ""
+
+
 class PromoteCaseRequest(BaseModel):
     asset_name: str = "regression-set"
 
@@ -125,6 +139,12 @@ class CreateABTestRequest(BaseModel):
 
 class AssignRunRequest(BaseModel):
     run_id: str
+
+
+class ShadowCompareRequest(BaseModel):
+    """Shadow-mode comparison input: one run per variant gets a copy."""
+
+    input: dict[str, Any] = Field(default_factory=dict)
 
 
 def create_evaluation_router(
@@ -272,6 +292,26 @@ def create_evaluation_router(
             )
         return {"cases": [_dump(c) for c in mined]}
 
+    @router.post("/cases/mine/random-sample")
+    def mine_random_samples(request: MineRandomSampleRequest) -> dict:
+        """Random-sample mining over terminal runs (spec section 23).
+
+        干净完成产 GOOD case，失败产 BAD case；(RANDOM_SAMPLE, run_id)
+        幂等。
+        """
+        _require_case_service(case_service)
+        mined = case_service.mine_random_samples(request.limit)
+        return {"cases": [_dump(c) for c in mined]}
+
+    @router.post("/cases/mine/monitoring")
+    def mine_monitoring_signal(request: MineMonitoringRequest) -> dict:
+        """External monitoring alert → forced BAD case (spec section 23)."""
+        _require_case_service(case_service)
+        case = case_service.mine_monitoring_signal(
+            request.run_id, reason=request.reason, monitor_ref=request.monitor_ref
+        )
+        return {"case": _dump(case)}
+
     @router.post("/cases/{case_id}/diagnose")
     def diagnose_case(case_id: str) -> dict:
         _require_case_service(case_service)
@@ -359,6 +399,20 @@ def create_evaluation_router(
         online_service.get_ab_test(ab_test_id)  # 404 on unknown test
         assignment = online_service.assign_run(request.run_id)
         return {"assignment": _dump(assignment) if assignment else None}
+
+    @router.post("/ab-tests/{ab_test_id}/shadow-compare")
+    def shadow_compare(ab_test_id: str, request: ShadowCompareRequest) -> dict:
+        """Shadow-mode comparison: one run per variant with the same input
+        (ABTest.metadata["mode"]="shadow", spec section 21)."""
+        _require_online_service(online_service)
+        online_service.get_ab_test(ab_test_id)  # 404 on unknown test
+        try:
+            comparisons = online_service.run_shadow_comparison(
+                ab_test_id, request.input
+            )
+        except InvalidStateTransitionError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        return {"comparisons": comparisons}
 
     @router.get("/ab-tests/{ab_test_id}/report")
     def ab_test_report(ab_test_id: str) -> dict:

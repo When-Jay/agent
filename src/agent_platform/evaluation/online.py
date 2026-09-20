@@ -14,6 +14,7 @@ variant 的 agent_version 为调用方标签，执行侧切换待 Agent 版本�
 import hashlib
 import logging
 from dataclasses import replace
+from typing import Callable
 
 from agent_platform.errors import InvalidStateTransitionError, NotFoundError
 from agent_platform.evaluation.domain.online import (
@@ -26,6 +27,7 @@ from agent_platform.evaluation.domain.online import (
     ABVariant,
 )
 from agent_platform.evaluation.storage import EvaluationStore
+from agent_platform.runtime.core import RunManager, SessionManager
 from agent_platform.runtime.core.models import RunStatus
 from agent_platform.runtime.core.stores import RuntimeStore
 
@@ -33,11 +35,17 @@ logger = logging.getLogger(__name__)
 
 
 class OnlineEvaluationService:
-    """A/B 实验生命周期、分流分配与逐 variant 度量报表。"""
+    """A/B 实验生命周期、分流分配、Shadow 比较与逐 variant 度量报表。"""
 
-    def __init__(self, runtime_store: RuntimeStore, evaluation_store: EvaluationStore) -> None:
+    def __init__(
+        self,
+        runtime_store: RuntimeStore,
+        evaluation_store: EvaluationStore,
+        run_dispatcher: Callable[[str], None] | None = None,
+    ) -> None:
         self._runtime_store = runtime_store
         self._store = evaluation_store
+        self._run_dispatcher = run_dispatcher
 
     # --- lifecycle ------------------------------------------------------------
 
@@ -179,6 +187,60 @@ class OnlineEvaluationService:
     def list_assignments(self, ab_test_id: str) -> list[ABAssignment]:
         self._require_test(ab_test_id)
         return self._store.list_assignments_for_test(ab_test_id)
+
+    # --- shadow mode (spec section 21; ABTest.metadata["mode"]="shadow") --------
+
+    def run_shadow_comparison(self, ab_test_id: str, input: dict | None = None) -> list[dict]:
+        """Shadow 比较：同一 input 按 variant 各建一条 Run 并派发执行。
+
+        适用 metadata["mode"]="shadow" 的实验：影子流量不来自真实用户，
+        由调用方显式触发。每个 variant Run 挂在 mode=shadow 标记的
+        session 下（shadow_test_id/variant_key 记入 session metadata），
+        经常规 ABAssignment 绑定后复用 report() 的 per-variant 度量。
+        深层自动镜像（每个生产 Run 自动触发 shadow）为保留能力。
+        """
+        test = self._require_test(ab_test_id)
+        if test.status != AB_RUNNING:
+            raise InvalidStateTransitionError(
+                f"shadow comparison requires a RUNNING AB test, got {test.status}"
+            )
+        if self._run_dispatcher is None:
+            raise RuntimeError("no run dispatcher wired into the online evaluation service")
+        sessions = SessionManager(self._runtime_store)
+        runs = RunManager(self._runtime_store)
+        comparisons: list[dict] = []
+        for variant in test.variants:
+            session = sessions.create_session(
+                application_id=test.application_id,
+                metadata={
+                    "mode": "shadow",
+                    "shadow_test_id": test.id,
+                    "variant_key": variant.key,
+                },
+            )
+            run = runs.create_run(
+                application_id=test.application_id,
+                session_id=session.id,
+                runtime_type=test.runtime_type,
+                input=dict(input or {}),
+            )
+            assignment = ABAssignment(
+                ab_test_id=test.id,
+                run_id=run.id,
+                session_id=session.id,
+                variant_key=variant.key,
+                agent_version=variant.agent_version,
+            )
+            self._store.save_assignment(assignment)
+            self._run_dispatcher(run.id)
+            comparisons.append(
+                {
+                    "variant_key": variant.key,
+                    "run_id": run.id,
+                    "assignment_id": assignment.id,
+                }
+            )
+        return comparisons
 
     # --- report -------------------------------------------------------------------
 

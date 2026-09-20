@@ -83,8 +83,8 @@ class RecommendedAction(str, Enum):
 class DiagnosisResult:
     """diagnose(case_id) 的输出（spec section 24）。
 
-    V2 确定性规则只产出 AGENT_FAILURE 与 COVERAGE_GAP；
-    EVALUATION_FAILURE 需要 Judge 校准证据，保留给 Phase 6。
+    确定性规则产出 AGENT_FAILURE / COVERAGE_GAP / EVALUATION_FAILURE
+    （评测设施自身失败，trial 有 error 无评分结果）。
     """
 
     id: str = field(default_factory=new_id)

@@ -345,7 +345,9 @@ def test_docker_execute_enforces_timeout(tmp_path):
             ExecutionRequest(request_id="slow", command="sleep 5", timeout=1.0),
         )
         assert result.timed_out is True
-        assert result.exit_code == 124
+        # GNU coreutils timeout exits 124 on deadline; busybox (alpine)
+        # propagates 128+SIGKILL because the wrapper uses -s KILL.
+        assert result.exit_code in (124, 137)
         await manager.destroy(sandbox.sandbox_id)
 
     asyncio.run(scenario())

@@ -374,10 +374,15 @@ class DockerSandboxProvider:
                 asyncio.to_thread(self._exec_run_blocking, container, exec_id, request.stdin),
                 timeout=request.timeout + _TIMEOUT_GRACE,
             )
-            # exit 124 from the timeout wrapper means the deadline elapsed;
+            # Deadline detection: GNU coreutils timeout exits 124 when the
+            # deadline elapses; busybox (alpine images) propagates
+            # 128+signal instead -- we wrap with -s KILL, i.e. 137. The
             # elapsed check avoids treating a command that legitimately
-            # exits 124 as a timeout.
-            timed_out = exit_code == 124 and (time.monotonic() - started) >= request.timeout * 0.9
+            # exits with one of these codes as a timeout.
+            elapsed = time.monotonic() - started
+            timed_out = (
+                exit_code in (124, 137) and elapsed >= request.timeout * 0.9
+            )
         except asyncio.TimeoutError:
             # GNU wrapper missing or stuck: abandon the exec; the daemon
             # thread ends when the process exits or the container dies.

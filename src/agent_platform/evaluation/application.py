@@ -14,6 +14,7 @@ from dataclasses import replace
 
 from agent_platform.errors import InvalidStateTransitionError, NotFoundError
 from agent_platform.evaluation.domain import (
+    ASSET_REGRESSION,
     EvaluationAsset,
     EvaluationEnvironment,
     EvaluationResult,
@@ -299,6 +300,56 @@ class EvaluationService:
             evaluator_ids=evaluator_ids,
         )
         return self.run_evaluation_run(run.id)
+
+    # --- regression patrol（spec section 22 巡检; plan-productionization G4） ---
+
+    def run_regression_patrol(
+        self,
+        *,
+        asset_name: str,
+        application_id: str,
+        agent_version: str = "patrol",
+        evaluator_ids: list[str] | None = None,
+    ) -> EvaluationRun:
+        """Replay every task of a REGRESSION asset as one patrol evaluation run.
+
+        巡检（INSPECTION）：把 regression-set 资产沉淀的任务集周期性重放。
+        资产任务集每次同步进固定名称的 patrol suite（不存在则创建），
+        之后完全复用 create/start_evaluation_run 流程；调用方（celery
+        patrol 任务）负责提供 application_id 并按需调度。
+        """
+        asset = next(
+            (
+                a
+                for a in self._store.list_assets(ASSET_REGRESSION)
+                if a.name == asset_name
+            ),
+            None,
+        )
+        if asset is None:
+            raise NotFoundError(f"regression asset not found: {asset_name}")
+        if not asset.task_ids:
+            raise ValueError(f"regression asset {asset_name} has no tasks")
+        suite_name = f"patrol-{asset_name}"
+        suite = next(
+            (s for s in self._store.list_suites() if s.name == suite_name), None
+        )
+        if suite is None:
+            suite = EvaluationSuite(
+                id=new_id(),
+                name=suite_name,
+                type="E2E",
+                task_ids=list(asset.task_ids),
+            )
+        else:
+            suite = replace(suite, task_ids=list(asset.task_ids))
+        self._store.save_suite(suite)
+        return self.start_evaluation_run(
+            suite_id=suite.id,
+            application_id=application_id,
+            agent_version=agent_version,
+            evaluator_ids=evaluator_ids or ["rule"],
+        )
 
     def get_evaluation_run(self, run_id: str) -> EvaluationRun:
         return self._require(

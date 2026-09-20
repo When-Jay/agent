@@ -2,12 +2,13 @@
 
 Mining 流程（spec section 23）：Signal → Candidate Case → Deduplication →
 Trace Enrichment → Case。V2 信号源：生产 Run 失败信号（PRODUCTION_SAMPLE）、
-评测失败 Trial（EVALUATION）、人工反馈（USER_FEEDBACK）；Monitoring/
-Random Sampling 为保留信号源。提升（promote）实现 plan Phase 9 的
-Bad Case → Diagnosis → Regression Set 反向沉淀。
+评测失败 Trial（EVALUATION）、人工反馈（USER_FEEDBACK）；Monitoring/Random Sampling 信号源已实现（plan-productionization G1/G2）。
+提升（promote）实现 plan Phase 9 的 Bad Case → Diagnosis → Regression Set
+反向沉淀。
 """
 
 import logging
+import random
 from dataclasses import replace
 
 from agent_platform.errors import InvalidStateTransitionError, NotFoundError
@@ -47,12 +48,17 @@ class CaseMiner:
         self._evaluation_store = evaluation_store
 
     def mine_run(
-        self, run_id: str, *, source: CaseSource = CaseSource.PRODUCTION_SAMPLE
+        self,
+        run_id: str,
+        *,
+        source: CaseSource = CaseSource.PRODUCTION_SAMPLE,
+        include_clean: bool = False,
     ) -> Case | None:
         """Mine one production Run: failure signals produce a BAD case.
 
-        干净完成的 Run 不产 Case（Random Sampling 属保留能力）；
-        同一 (source, trace_id) 已有 Case 时幂等返回既有 Case。
+        include_clean=True 且 source=RANDOM_SAMPLE 时，干净完成的 Run 产
+        GOOD case（Random Sampling 信号源，spec section 23）；其余干净
+        Run 不产 Case。同一 (source, trace_id) 已有 Case 时幂等返回既有。
         """
         run = self._require_run(run_id)
         existing = self._evaluation_store.find_case_by_trace(source.value, run_id)
@@ -61,6 +67,27 @@ class CaseMiner:
         events = self._runtime_store.list_events(run_id)
         failures = [e for e in events if e.event_type in _FAILURE_EVENT_TYPES]
         if run.status is not RunStatus.FAILED and not failures:
+            if (
+                include_clean
+                and source is CaseSource.RANDOM_SAMPLE
+                and run.status is RunStatus.COMPLETED
+            ):
+                case = Case(
+                    source=source,
+                    type=CaseType.GOOD,
+                    trace_id=run_id,
+                    input=run.input,
+                    output=run.output or {},
+                    evidence=[
+                        {
+                            "event_type": "RUN_COMPLETED",
+                            "run_status": run.status.value,
+                            "reason": "random sample of a clean run",
+                        }
+                    ],
+                )
+                self._evaluation_store.save_case(case)
+                return case
             return None
         evidence = [
             {
@@ -119,6 +146,39 @@ class CaseMiner:
             cases.append(case)
         return cases
 
+    def mine_monitoring_signal(
+        self, run_id: str, *, reason: str, monitor_ref: str = ""
+    ) -> Case:
+        """External monitoring alert → forced BAD case (spec section 23
+        MONITORING 信号源)。
+
+        告警本身即证据：即使 Run 未失败也产 BAD case（外部监控判定的
+        质量问题不依赖平台内失败信号）。幂等键同其余信号源：
+        (MONITORING, run_id)。
+        """
+        run = self._require_run(run_id)
+        existing = self._evaluation_store.find_case_by_trace(
+            CaseSource.MONITORING.value, run_id
+        )
+        if existing is not None:
+            return existing
+        case = Case(
+            source=CaseSource.MONITORING,
+            type=CaseType.BAD,
+            trace_id=run_id,
+            input=run.input,
+            output=run.output or {},
+            evidence=[
+                {
+                    "reason": reason,
+                    "monitor_ref": monitor_ref,
+                    "run_status": run.status.value,
+                }
+            ],
+        )
+        self._evaluation_store.save_case(case)
+        return case
+
     def _require_run(self, run_id: str):
         run = self._runtime_store.get_run(run_id)
         if run is None:
@@ -146,6 +206,36 @@ class CaseService:
 
     def mine_evaluation_run(self, evaluation_run_id: str) -> list[Case]:
         return self._miner.mine_evaluation_run(evaluation_run_id)
+
+    def mine_random_samples(self, limit: int) -> list[Case]:
+        """Random-sample mining over terminal runtime runs (spec section 23
+        RANDOM_SAMPLE 信号源)。
+
+        从终态 Run（COMPLETED/FAILED）中随机抽取至多 limit 条：干净完成
+        产 GOOD，失败产 BAD；同 (source, trace_id) 幂等。
+        """
+        limit = max(1, int(limit))
+        terminal = [
+            run
+            for run in self._runtime_store.list_runs()
+            if run.status in (RunStatus.COMPLETED, RunStatus.FAILED)
+        ]
+        selected = random.sample(terminal, min(limit, len(terminal)))
+        cases: list[Case] = []
+        for run in selected:
+            case = self._miner.mine_run(
+                run.id, source=CaseSource.RANDOM_SAMPLE, include_clean=True
+            )
+            if case is not None:
+                cases.append(case)
+        return cases
+
+    def mine_monitoring_signal(
+        self, run_id: str, *, reason: str, monitor_ref: str = ""
+    ) -> Case:
+        return self._miner.mine_monitoring_signal(
+            run_id, reason=reason, monitor_ref=monitor_ref
+        )
 
     # --- manual cases（USER_FEEDBACK 等） --------------------------------------
 

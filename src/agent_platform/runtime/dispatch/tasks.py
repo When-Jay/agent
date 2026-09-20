@@ -10,10 +10,13 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
+from celery.schedules import crontab
+
 from agent_platform.config import Settings
 from agent_platform.runtime.dispatch.celery_app import (
     EVALUATION_TASK_NAME,
     EVOLUTION_TASK_NAME,
+    PATROL_TASK_NAME,
     RESUME_TASK_NAME,
     TASK_NAME,
     create_celery_app,
@@ -22,7 +25,44 @@ from agent_platform.runtime.dispatch.celery_app import (
 logger = logging.getLogger(__name__)
 
 _settings = Settings()
-celery_app = create_celery_app(_settings.redis_url, eager=_settings.celery_task_always_eager)
+
+
+def _patrol_beat_schedule() -> dict[str, Any]:
+    """celery beat schedule for the regression patrol (plan-productionization G4).
+
+    EVALUATION_PATROL_CRON 为空或非法时不注册：beat 服务空转无害。
+    """
+    cron = _settings.evaluation_patrol_cron.strip()
+    if not cron:
+        return {}
+    fields = cron.split()
+    if len(fields) != 5:
+        logger.warning(
+            "invalid EVALUATION_PATROL_CRON %r (expected 5 crontab fields); "
+            "patrol not scheduled",
+            cron,
+        )
+        return {}
+    minute, hour, day_of_month, month_of_year, day_of_week = fields
+    try:
+        schedule = crontab(
+            minute=minute,
+            hour=hour,
+            day_of_month=day_of_month,
+            month_of_year=month_of_year,
+            day_of_week=day_of_week,
+        )
+    except ValueError:
+        logger.warning("invalid EVALUATION_PATROL_CRON %r; patrol not scheduled", cron)
+        return {}
+    return {"evaluation-patrol": {"task": PATROL_TASK_NAME, "schedule": schedule}}
+
+
+celery_app = create_celery_app(
+    _settings.redis_url,
+    eager=_settings.celery_task_always_eager,
+    beat_schedule=_patrol_beat_schedule(),
+)
 
 _orchestrator_builder: Callable[[], object] | None = None
 
@@ -205,3 +245,26 @@ def execute_evolution_run(evolution_run_id: str) -> str:
     service = builder()
     service.execute_run(evolution_run_id)
     return evolution_run_id
+
+
+@celery_app.task(name=PATROL_TASK_NAME)
+def execute_evaluation_patrol() -> str:
+    """Regression patrol: replay the configured REGRESSION asset (G4).
+
+    未配置 application_id 时告警并跳过（beat 空转无害的运营契约）；
+    巡检编排复用 EvaluationService.run_regression_patrol。
+    """
+    application_id = _settings.evaluation_patrol_application_id
+    if not application_id:
+        logger.warning(
+            "evaluation patrol skipped: EVALUATION_PATROL_APPLICATION_ID is not set"
+        )
+        return ""
+    builder = _evaluation_runner_builder or _default_evaluation_builder
+    service = builder()
+    run = service.run_regression_patrol(
+        asset_name=_settings.evaluation_patrol_asset,
+        application_id=application_id,
+    )
+    _export_evaluation_scores(run.id)
+    return run.id

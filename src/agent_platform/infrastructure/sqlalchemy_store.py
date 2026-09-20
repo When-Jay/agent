@@ -114,6 +114,16 @@ def create_sqlalchemy_engine(database_url: str) -> Engine:
     return create_engine(database_url)
 
 
+def ensure_schema(engine: Engine, schema_metadata: MetaData) -> None:
+    """Schema 初始化策略：SQLite 保留 create_all，其余方言交给 Alembic。
+
+    测试/内存库走 create_all 保持自包含；生产（Postgres）由
+    `alembic upgrade head` 负责建表/演进，避免绕过迁移链路。
+    """
+    if engine.dialect.name == "sqlite":
+        schema_metadata.create_all(engine)
+
+
 def _iso(value: datetime | None) -> datetime | None:
     if value is None:
         return None
@@ -127,7 +137,7 @@ class SQLAlchemyRuntimeStore:
 
     def __init__(self, database_url: str) -> None:
         self.engine = create_sqlalchemy_engine(database_url)
-        metadata.create_all(self.engine)
+        ensure_schema(self.engine, metadata)
 
     # -- applications / sessions ---------------------------------------------
 

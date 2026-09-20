@@ -8,10 +8,17 @@ workers. Request handlers import Runtime Core and dispatch wiring only
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Response
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
+from agent_platform.api.middleware import (
+    BodyLimitMiddleware,
+    RateLimitMiddleware,
+    RateLimiter,
+    RedisRateLimiter,
+)
 from agent_platform.config import Settings
 from agent_platform.evolution.api import attach_evolution_routes
 from agent_platform.evolution.experiment import (
@@ -133,10 +140,39 @@ def create_app(
     stream_backend: StreamBackend | None = None,
     tool_capability=None,
     judge_model=None,
+    rate_limiter: RateLimiter | None = None,
 ) -> FastAPI:
     resolved_settings = settings or Settings()
     configure_logging(resolved_settings.log_level)
     app = FastAPI(title=resolved_settings.app_name, version=resolved_settings.version)
+
+    # API hardening (plan-productionization task 3). add_middleware stacks
+    # outermost-last: CORS ends up outside the limiters so preflight
+    # requests are answered before any body/rate check applies.
+    max_body_bytes = int(resolved_settings.max_request_body_mb * 1024 * 1024)
+    if max_body_bytes > 0:
+        app.add_middleware(BodyLimitMiddleware, max_bytes=max_body_bytes)
+    if resolved_settings.rate_limit_enabled:
+        if rate_limiter is None:
+            rate_limiter = RedisRateLimiter(resolved_settings.redis_url)
+        app.add_middleware(
+            RateLimitMiddleware,
+            limiter=rate_limiter,
+            requests_per_minute=resolved_settings.rate_limit_rpm,
+        )
+    cors_origins = [
+        origin.strip()
+        for origin in resolved_settings.cors_allow_origins.split(",")
+        if origin.strip()
+    ]
+    if cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=cors_origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
 
     store = create_runtime_store(resolved_settings.database_url)
     runs = RunManager(store)
@@ -580,7 +616,12 @@ def create_app(
     )
     diagnosis_service = DiagnosisService(store, evaluation_store)
     # Online Evaluation mode=AB (spec section 21): traffic split + measurement.
-    online_service = OnlineEvaluationService(store, evaluation_store)
+    # Shadow comparison dispatches variant runs through the standard path.
+    online_service = OnlineEvaluationService(
+        store,
+        evaluation_store,
+        run_dispatcher=lambda run_id: enqueue_run(celery, run_id),
+    )
     attach_evaluation_routes(
         app,
         evaluation_service,

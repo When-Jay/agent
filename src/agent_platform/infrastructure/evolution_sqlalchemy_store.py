@@ -21,7 +21,7 @@ from agent_platform.evolution.domain.run import (
 )
 from agent_platform.evolution.domain.task import EvolutionTask
 from agent_platform.evolution.serialization import dump, load
-from agent_platform.infrastructure.sqlalchemy_store import create_sqlalchemy_engine
+from agent_platform.infrastructure.sqlalchemy_store import create_sqlalchemy_engine, ensure_schema
 
 metadata = MetaData()
 
@@ -124,7 +124,7 @@ class SQLEvolutionStore:
 
     def __init__(self, database_url: str) -> None:
         self.engine = create_sqlalchemy_engine(database_url)
-        metadata.create_all(self.engine)
+        ensure_schema(self.engine, metadata)
 
     # -- tasks -----------------------------------------------------------------
     def save_task(self, task: EvolutionTask) -> None:

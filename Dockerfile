@@ -10,6 +10,9 @@ WORKDIR /app
 
 COPY pyproject.toml ./
 COPY src ./src
+# 数据库迁移脚本随镜像分发（api 容器启动时执行 alembic upgrade head）
+COPY alembic.ini ./
+COPY alembic ./alembic
 
 # psycopg2-binary wheels bundle libpq; no system packages needed.
 RUN pip install --no-cache-dir .

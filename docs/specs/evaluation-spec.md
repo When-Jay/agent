@@ -661,8 +661,16 @@ V2 实现边界（Second Stage，对齐 050-evaluation.md section 19）：
   variant 的 `agent_version` 为调用方标签——平台尚无 Agent 版本化
   概念，执行侧行为切换为保留能力。同一 (application_id,
   runtime_type) 同时只允许一个 RUNNING 实验。
-* Shadow / 巡检调度（Inspection Scheduling）为保留能力；Inspection
-  复用离线 Run 对 INSPECTION asset 的执行，调度由后续 Phase 提供。
+* **Shadow 已实现（显式触发）**：`ABTest.metadata["mode"]="shadow"` 时
+  `run_shadow_comparison(ab_test_id, input)` 按 variant 各建一条 Run
+  （session metadata 标记 mode/shadow_test_id/variant_key），经常规
+  Assignment 绑定后复用 per-variant 度量报表。深层自动镜像（每个生产
+  Run 自动触发 shadow）为保留能力。
+* **巡检调度已实现（INSPECTION）**：celery beat 按
+  `EVALUATION_PATROL_CRON` 触发 patrol 任务，把 REGRESSION asset
+  （`EVALUATION_PATROL_ASSET`，默认 regression-set）的任务集同步进
+  patrol suite 并复用离线 Run 全流程执行（队列：evaluation）；
+  `EVALUATION_PATROL_APPLICATION_ID` 未设置时任务跳过。
 
 ---
 
@@ -725,10 +733,11 @@ Attribution
 V2 实现边界：
 
 * 信号源已实现：生产 Run 失败信号（PRODUCTION_SAMPLE）、评测失败
-  Trial（EVALUATION）、人工反馈（USER_FEEDBACK）。
+  Trial（EVALUATION）、人工反馈（USER_FEEDBACK）、随机采样
+  （RANDOM_SAMPLE：终态 Run 随机抽取，干净完成产 GOOD、失败产 BAD）、
+  外部监控告警（MONITORING：即使 Run 未失败也强制产 BAD）。
 * Deduplication 按 `(source, trace_id)` 幂等；Trace Enrichment 从
-  Runtime Run 回填 input/output；干净完成的 Run 不产 Case
-  （RANDOM_SAMPLE / MONITORING 信号源保留）。
+  Runtime Run 回填 input/output。
 
 ---
 
@@ -768,7 +777,10 @@ V2 实现边界（确定性归因规则，不使用 LLM）：
   LLMFailed → model；NodeFailed → workflow；均推荐 AGENT_FIX。
 * trace 完整但过程无失败信号（E2E 失败无法定位阶段）→ COVERAGE_GAP /
   ADD_COVERAGE（plan 050 Phase 4 原则）。
-* EVALUATION_FAILURE 归因需要 Judge 校准证据（Phase 6），保留不产出。
+* EVALUATION_FAILURE 已实现：source=EVALUATION 的 Case，其 Trial
+  outcome 有 error 且无任何 Evaluator 评分结果 → EVALUATION_FAILURE /
+  harness / EVAL_FIX；有评分结果（Agent 已执行且被判定）→ 落入上述
+  生产归因规则。
 
 ---
 

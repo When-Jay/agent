@@ -2,13 +2,16 @@ services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: agent
-      POSTGRES_PASSWORD: agent
-      POSTGRES_DB: agent_platform
+      POSTGRES_USER: ${POSTGRES_USER:-agent}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agent}
+      POSTGRES_DB: ${POSTGRES_DB:-agent_platform}
     ports:
-      - "5432:5432"
+      # 绑定本机回环，避免开发库暴露到局域网；生产部署按需收紧/移除
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    networks:
+      - backend
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U agent -d agent_platform"]
       interval: 5s
@@ -17,21 +20,35 @@ services:
 
   redis:
     image: redis:7-alpine
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:-changeme}"]
+    environment:
+      # 供 healthcheck 读取；密码本身来自 .env / 环境变量
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-changeme}
     ports:
       # 宿主机 6379 落在 Windows 保留端口段(6368-6467)，映射到 16379；
       # 容器内仍是 6379，服务间连接不受影响。
-      - "16379:6379"
+      - "127.0.0.1:16379:6379"
+    networks:
+      - backend
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test:
+        [
+          "CMD-SHELL",
+          "redis-cli --no-auth-warning -a \"$$REDIS_PASSWORD\" ping | grep -q PONG",
+        ]
       interval: 5s
       timeout: 3s
       retries: 10
 
   api:
     build: .
+    # api 是唯一执行数据库迁移的进程：先 upgrade 再起服务
+    command: >
+      sh -c "alembic upgrade head &&
+      uvicorn agent_platform.api.main:app --host 0.0.0.0 --port 8000"
     environment: &runtime_env
-      DATABASE_URL: postgresql+psycopg2://agent:agent@postgres:5432/agent_platform
-      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-agent}:${POSTGRES_PASSWORD:-agent}@postgres:5432/${POSTGRES_DB:-agent_platform}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-changeme}@redis:6379/0
       # 多进程部署必须开启：API 的 SSE 订阅 worker 发布的事件流，
       # steering 队列也靠同一开关共享（redis_stream.create_steering_channel）。
       REDIS_EVENT_FANOUT_ENABLED: "1"
@@ -42,8 +59,25 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      # 可观测性（可选；配置后启用 Langfuse 导出）
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-}
+      # MCP 凭据引用与服务器声明（可选）
+      MCP_SERVERS_JSON: ${MCP_SERVERS_JSON:-}
+      # API 加固项（默认值与 config.py 保持一致；CORS 默认空=仅同源）
+      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-}
+      MAX_REQUEST_BODY_MB: ${MAX_REQUEST_BODY_MB:-10}
+      RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-1}
+      RATE_LIMIT_RPM: ${RATE_LIMIT_RPM:-120}
+      # Evaluation 巡检（cron 为空=不注册 beat 调度）
+      EVALUATION_PATROL_CRON: ${EVALUATION_PATROL_CRON:-}
+      EVALUATION_PATROL_ASSET: ${EVALUATION_PATROL_ASSET:-regression-set}
     ports:
       - "8000:8000"
+    networks:
+      - frontend
+      - backend
     depends_on:
       postgres:
         condition: service_healthy
@@ -69,22 +103,66 @@ services:
     build: .
     command: >
       celery -A agent_platform.runtime.dispatch.tasks.celery_app worker
-      --loglevel=INFO --concurrency=2
+      --loglevel=INFO --concurrency=2 -Q default
     environment: *runtime_env
+    networks:
+      - backend
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+      # 等 api 完成迁移后再消费任务，避免表未建好
+      api:
+        condition: service_healthy
     # volumes: 同 api，按需挂载 docker.sock
+
+  # 评测/进化/巡检任务专用 worker：与生产 Run 隔离，防止长评测饿死主队列
+  worker-eval:
+    build: .
+    command: >
+      celery -A agent_platform.runtime.dispatch.tasks.celery_app worker
+      --loglevel=INFO --concurrency=1 -Q evaluation
+    environment: *runtime_env
+    networks:
+      - backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    # volumes: 同 api，按需挂载 docker.sock
+
+  # 定时调度器：EVALUATION_PATROL_CRON 未配置时空转无害；单实例即可
+  beat:
+    build: .
+    command: celery -A agent_platform.runtime.dispatch.tasks.celery_app beat --loglevel=INFO
+    environment: *runtime_env
+    networks:
+      - backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
 
   web:
     build: ./web
     ports:
       - "3000:80"
+    networks:
+      - frontend
     depends_on:
       api:
         condition: service_healthy
+
+networks:
+  frontend: {}
+  backend: {}
 
 volumes:
   postgres_data:
