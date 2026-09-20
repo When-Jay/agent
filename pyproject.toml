@@ -15,7 +15,7 @@ dependencies = [
     "langgraph",
     "langchain",
     "deepagents",
-    "celery",
+    "celery[gevent]",
     "mcp",
     "langfuse",
     "docker",

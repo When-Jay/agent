@@ -12,4 +12,9 @@ COPY --from=build /app/dist /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/templates/default.conf.template
 # 反代上游默认指向 compose 内的 api 服务，运行时可用 BACKEND_UPSTREAM 覆盖
 ENV BACKEND_UPSTREAM=http://api:8000
+# 边缘限流（limit_req_zone rate 必须是字面量，经 envsubst 渲染后注入）与
+# 请求体上限；后者应与 API 的 MAX_REQUEST_BODY_MB 保持一致
+ENV NGINX_API_RATE=30r/s
+ENV NGINX_API_BURST=60
+ENV NGINX_MAX_BODY_SIZE=10m
 EXPOSE 80

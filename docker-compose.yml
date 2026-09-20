@@ -108,9 +108,10 @@ services:
 
   worker:
     build: .
+    # gevent 协程池：Run 执行是 IO 密集（LLM/工具调用），协程密度远高于 prefork
     command: >
       celery -A agent_platform.runtime.dispatch.tasks.celery_app worker
-      --loglevel=INFO --concurrency=2 -Q default
+      --loglevel=INFO --pool=gevent --concurrency=8 -Q default
     environment: *runtime_env
     networks:
       - backend
@@ -129,7 +130,7 @@ services:
     build: .
     command: >
       celery -A agent_platform.runtime.dispatch.tasks.celery_app worker
-      --loglevel=INFO --concurrency=1 -Q evaluation
+      --loglevel=INFO --pool=gevent --concurrency=2 -Q evaluation
     environment: *runtime_env
     networks:
       - backend
@@ -161,6 +162,12 @@ services:
     build: ./web
     ports:
       - "3000:80"
+    environment:
+      # 边缘层：真实 IP 限流与请求体上限在此生效（与 MAX_REQUEST_BODY_MB 对齐）
+      BACKEND_UPSTREAM: ${BACKEND_UPSTREAM:-http://api:8000}
+      NGINX_API_RATE: ${NGINX_API_RATE:-30r/s}
+      NGINX_API_BURST: ${NGINX_API_BURST:-60}
+      NGINX_MAX_BODY_SIZE: ${NGINX_MAX_BODY_SIZE:-10m}
     networks:
       - frontend
     depends_on:
