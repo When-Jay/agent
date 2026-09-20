@@ -51,14 +51,20 @@ ToolCapability
 
 ## 4. Knowledge
 
-预留：
+V1 implements `retrieve` / `get_document` / `get_context`;
+`rerank` remains reserved. Interface:
+`runtime/capabilities/knowledge.py`; implementation: top-level
+`agent_platform.knowledge` module (Knowledge Service, reserved by
+00-system-overview.md section 2). Contract:
+knowledge-rag-spec.md; architecture: 08-knowledge-architecture.md;
+plan: 070-knowledge-rag.md.
 
 ```text
 KnowledgeCapability
-├── retrieve
-├── rerank
-├── get_document
-└── get_context
+├── retrieve        # V1: parent/child vector retrieval (small-to-big)
+├── rerank          # 预留
+├── get_document    # V1: document info + anchor inventory
+└── get_context     # V1: retrieve + formatted prompt context
 ```
 
 ---

@@ -86,3 +86,14 @@ class Settings:
     sandbox_warm_pool_claim_timeout_ms: int = field(
         default_factory=lambda: _env_int("SANDBOX_WARM_POOL_CLAIM_TIMEOUT_MS", 1000)
     )
+    # Knowledge / RAG（knowledge-rag-spec.md section 14）：模块本身无开关
+    # （DB 路由无条件挂载，导入期无外部依赖）；embedding provider 惰性构造，
+    # 密钥留在宿主机环境变量。Settings 只存原始字符串，解析在
+    # knowledge.embeddings。tool 默认关闭（worker 侧注册）。
+    knowledge_embedding_provider: str = field(
+        default_factory=lambda: getenv("KNOWLEDGE_EMBEDDING_PROVIDER", "openai")
+    )
+    knowledge_openai_embedding_model: str = field(
+        default_factory=lambda: getenv("KNOWLEDGE_OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+    )
+    knowledge_tool_enabled: bool = field(default_factory=lambda: _env_bool("KNOWLEDGE_TOOL_ENABLED", False))

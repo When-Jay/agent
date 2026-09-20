@@ -12,6 +12,7 @@ from agent_platform.runtime.capabilities.budget import (
     BudgetState,
     InMemoryBudget,
 )
+from agent_platform.runtime.capabilities.knowledge import KnowledgeCapability, RetrievedContext
 from agent_platform.runtime.capabilities.model import ModelMessage, ModelResponse
 from agent_platform.runtime.capabilities.model_capability import ModelCapability
 from agent_platform.runtime.capabilities.steering import (
@@ -29,9 +30,11 @@ __all__ = [
     "BudgetState",
     "InMemoryBudget",
     "InMemorySteeringChannel",
+    "KnowledgeCapability",
     "ModelCapability",
     "ModelMessage",
     "ModelResponse",
+    "RetrievedContext",
     "SteeringChannel",
     "SteeringMessage",
     "ToolCallRequest",

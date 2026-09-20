@@ -281,13 +281,35 @@ def build_default_orchestrator(settings: Settings | None = None) -> RuntimeOrche
 
 
 def _build_tool_capability(settings: Settings):
-    """Native registry beside the MCP gateway when servers are configured."""
+    """Native registry beside the MCP gateway when servers are configured.
+
+    The knowledge tool registers only when KNOWLEDGE_TOOL_ENABLED=true
+    (default off: existing agent tool surfaces must not change). The
+    service holds (store URL, provider) and rebuilds per orchestrator,
+    mirroring the per-task composition; no in-process caches.
+    """
     from agent_platform.runtime.capabilities.tool_capability import (
         CompositeToolCapability,
         InMemoryToolCapability,
     )
 
     native = InMemoryToolCapability()
+    if settings.knowledge_tool_enabled:
+        from agent_platform.infrastructure.knowledge_sqlalchemy_store import (
+            create_knowledge_store,
+        )
+        from agent_platform.knowledge.application import KnowledgeService
+        from agent_platform.knowledge.embeddings import create_embedding_provider
+        from agent_platform.knowledge.tool import (
+            KNOWLEDGE_TOOL_SPEC,
+            create_knowledge_tool_handler,
+        )
+
+        service = KnowledgeService(
+            create_knowledge_store(settings.database_url),
+            create_embedding_provider(settings),
+        )
+        native.register(KNOWLEDGE_TOOL_SPEC, create_knowledge_tool_handler(service))
     if not settings.mcp_servers_json.strip():
         return native
     from agent_platform.mcp.credentials import EnvCredentialResolver

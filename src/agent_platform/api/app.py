@@ -43,6 +43,10 @@ from agent_platform.evaluation.evaluators import (
 from agent_platform.evaluation.harness import TrialRunner
 from agent_platform.errors import NotFoundError
 from agent_platform.infrastructure.evaluation_sqlalchemy_store import create_evaluation_store
+from agent_platform.infrastructure.knowledge_sqlalchemy_store import create_knowledge_store
+from agent_platform.knowledge.api import attach_knowledge_routes
+from agent_platform.knowledge.application import KnowledgeService
+from agent_platform.knowledge.embeddings import create_embedding_provider
 from agent_platform.logging import configure_logging
 from agent_platform.observability import get_metrics_collector
 from agent_platform.runtime.core import (
@@ -140,6 +144,7 @@ def create_app(
     stream_backend: StreamBackend | None = None,
     tool_capability=None,
     judge_model=None,
+    knowledge_service: KnowledgeService | None = None,
     rate_limiter: RateLimiter | None = None,
 ) -> FastAPI:
     resolved_settings = settings or Settings()
@@ -650,6 +655,15 @@ def create_app(
         evolution_service,
         run_dispatcher=lambda run_id: enqueue_evolution_run(celery, run_id),
     )
+
+    # Knowledge platform (08-knowledge-architecture.md): DB-backed
+    # management routes attach unconditionally (no external dependency at
+    # import; the embedding provider constructs lazily on first use).
+    resolved_knowledge_service = knowledge_service or KnowledgeService(
+        create_knowledge_store(resolved_settings.database_url),
+        create_embedding_provider(resolved_settings),
+    )
+    attach_knowledge_routes(app, resolved_knowledge_service)
 
     return app
 

@@ -173,3 +173,49 @@ def test_evolution_domain_stays_self_contained():
                 offenders.append((path.relative_to(PROJECT_ROOT).as_posix(), imported))
 
     assert offenders == []
+
+
+def test_knowledge_module_boundary():
+    # knowledge-rag-spec.md section 1: the knowledge module stays free of
+    # platform layers and execution runtimes; runtime.capabilities (the
+    # interface home) is its allowed runtime dependency.
+    forbidden_prefixes = (
+        "agent_platform.api",
+        "agent_platform.infrastructure",
+        "agent_platform.mcp",
+        "agent_platform.observability",
+        "agent_platform.evaluation",
+        "agent_platform.evolution",
+        "agent_platform.sandbox",
+        "agent_platform.runtime.agent",
+        "agent_platform.runtime.workflow",
+        "agent_platform.runtime.dispatch",
+        "celery",
+        "langgraph",
+        "deepagents",
+    )
+
+    offenders = []
+    for path in (SRC_ROOT / "knowledge").rglob("*.py"):
+        for imported in _imports_for(path):
+            if imported.startswith(forbidden_prefixes):
+                offenders.append((path.relative_to(PROJECT_ROOT).as_posix(), imported))
+
+    assert offenders == []
+
+
+def test_knowledge_langchain_confined_to_seams():
+    # knowledge-rag-spec.md section 1: LangChain is confined to the two
+    # declared seams (chunking.py splitter, embeddings.py adapter).
+    allowed_seams = {"chunking.py", "embeddings.py"}
+    forbidden_prefixes = ("langchain",)
+
+    offenders = []
+    for path in (SRC_ROOT / "knowledge").rglob("*.py"):
+        if path.name in allowed_seams:
+            continue
+        for imported in _imports_for(path):
+            if imported.startswith(forbidden_prefixes):
+                offenders.append((path.relative_to(PROJECT_ROOT).as_posix(), imported))
+
+    assert offenders == []
