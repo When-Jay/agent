@@ -19,6 +19,7 @@ dependencies = [
     "mcp",
     "langfuse",
     "docker",
+    "kubernetes",
 ]
 
 [project.optional-dependencies]
