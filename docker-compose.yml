@@ -45,7 +45,8 @@ services:
     # api 是唯一执行数据库迁移的进程：先 upgrade 再起服务
     command: >
       sh -c "alembic upgrade head &&
-      uvicorn agent_platform.api.main:app --host 0.0.0.0 --port 8000"
+      uvicorn agent_platform.api.main:app --host 0.0.0.0 --port 8000
+      --workers ${API_WORKERS:-2}"
     environment: &runtime_env
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-agent}:${POSTGRES_PASSWORD:-agent}@postgres:5432/${POSTGRES_DB:-agent_platform}
       REDIS_URL: redis://:${REDIS_PASSWORD:-changeme}@redis:6379/0
@@ -70,6 +71,12 @@ services:
       MAX_REQUEST_BODY_MB: ${MAX_REQUEST_BODY_MB:-10}
       RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-1}
       RATE_LIMIT_RPM: ${RATE_LIMIT_RPM:-120}
+      # 并发容量：API 进程数与 DB 连接池（Postgres max_connections 需覆盖
+      # workers × (pool_size + max_overflow) 总和并留余量）
+      API_WORKERS: ${API_WORKERS:-2}
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-10}
+      DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-20}
+      DB_POOL_RECYCLE: ${DB_POOL_RECYCLE:-1800}
       # Evaluation 巡检（cron 为空=不注册 beat 调度）
       EVALUATION_PATROL_CRON: ${EVALUATION_PATROL_CRON:-}
       EVALUATION_PATROL_ASSET: ${EVALUATION_PATROL_ASSET:-regression-set}

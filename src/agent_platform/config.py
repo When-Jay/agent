@@ -60,3 +60,9 @@ class Settings:
     evaluation_patrol_application_id: str = field(
         default_factory=lambda: getenv("EVALUATION_PATROL_APPLICATION_ID", "")
     )
+    # DB 连接池（仅 Postgres 方言生效；SQLite 路径不变）。多进程部署时
+    # Postgres max_connections 必须覆盖 workers × (pool_size + max_overflow)
+    # 的总和并留余量。recycle 单位秒，避免被服务端/中间件静默断开。
+    db_pool_size: int = field(default_factory=lambda: _env_int("DB_POOL_SIZE", 10))
+    db_max_overflow: int = field(default_factory=lambda: _env_int("DB_MAX_OVERFLOW", 20))
+    db_pool_recycle: int = field(default_factory=lambda: _env_int("DB_POOL_RECYCLE", 1800))

@@ -26,6 +26,7 @@ from sqlalchemy import (
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import StaticPool
 
+from agent_platform.config import Settings
 from agent_platform.runtime.core.events import RuntimeEvent, RuntimeEventType
 from agent_platform.runtime.core.models import (
     Application,
@@ -110,6 +111,20 @@ def create_sqlalchemy_engine(database_url: str) -> Engine:
             database_url,
             connect_args={"check_same_thread": False},
             poolclass=StaticPool,
+        )
+    if not _is_sqlite(database_url):
+        # Server dialects (PostgreSQL) get an explicit pool: the SQLAlchemy
+        # default of pool_size=5 per process silently exhausts Postgres
+        # max_connections once uvicorn workers and celery fork processes.
+        # pool_pre_ping evicts connections dropped by the server or by
+        # stateful middlewares; recycle bounds their lifetime anyway.
+        settings = Settings()
+        return create_engine(
+            database_url,
+            pool_size=settings.db_pool_size,
+            max_overflow=settings.db_max_overflow,
+            pool_recycle=settings.db_pool_recycle,
+            pool_pre_ping=True,
         )
     return create_engine(database_url)
 
