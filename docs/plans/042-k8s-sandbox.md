@@ -1,5 +1,34 @@
 # Plan 042 — Kubernetes Sandbox
 
+> **Status: IMPLEMENTED** (commit b0264ae). Implementation:
+> `src/agent_platform/sandbox/providers/kubernetes.py`, tests:
+> `tests/test_k8s_sandbox.py` (40 pure-helper unit tests pass locally;
+> the cluster contract suite and timeout test are gated on cluster
+> availability — integration verification pending).
+>
+> Deviations from the plan text below (documented in
+> 06-sandbox-architecture.md section 11.1):
+>
+> * **PID limits**: not settable per-pod in upstream Kubernetes;
+>   `SandboxResources.pids` maps to kubelet-level `PodPidsLimit`
+>   (cluster configuration), not container resources.
+> * **Recovery (section 4/13)**: pod failure is normalized as
+>   `SandboxUnavailable`/`ProviderError` and surfaced via health
+>   status; automatic pod replacement is not implemented (manager
+>   recovery engine is future work).
+> * **NetworkPolicy granularity**: policies are per-sandbox (named
+>   `<pod>-netpol`, selected by sandbox-id label) rather than
+>   namespace-wide; `INTERNET_ONLY` requires `cluster_cidrs` at
+>   provider construction to deny private ranges, otherwise
+>   unrestricted (documented limitation).
+> * **Workspace**: `emptyDir` by default; persistence requires
+>   spec metadata `workspace_pvc` (pre-created PVC). PVC lifecycle is
+>   NOT owned by the provider (section 14 respected).
+> * **Upload/download**: exec-stdin tar and `tar|base64` (no archive
+>   API in k8s exec); stdin EOF relies on the empty-stdin-frame
+>   behavior of the apiserver websocket protocol — verify on a real
+>   cluster before production use.
+
 ## 1. Objective
 
 Implement Kubernetes as the production Sandbox provider.

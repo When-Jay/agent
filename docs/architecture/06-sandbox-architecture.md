@@ -539,6 +539,39 @@ The provider is responsible for:
 
 The Agent does not directly access the Kubernetes API.
 
+### 11.1 Implementation Status (plan 042, implemented)
+
+The Kubernetes provider is implemented in
+`src/agent_platform/sandbox/providers/kubernetes.py` with the SDK
+imported lazily. Actual mapping decisions:
+
+| Contract | Kubernetes mapping |
+| --- | --- |
+| 1 Sandbox | 1 Pod + hold command (`restartPolicy=Never`) |
+| `SandboxResources` | requests+limits: cpu / memory / ephemeral-storage (pids is **not** settable per-pod; requires kubelet-level `PodPidsLimit`) |
+| `NetworkMode.NONE` | NetworkPolicy: deny all ingress+egress |
+| `NetworkMode.INTERNAL` | same-namespace only + cluster DNS |
+| `NetworkMode.ALLOWLIST` | DNS + ipBlock egress rules (CIDR; DNS-name allowlisting needs an egress proxy) |
+| `NetworkMode.INTERNET_ONLY` | deny egress to `cluster_cidrs` when provided at construction, otherwise unrestricted (documented limitation) |
+| workspace | `emptyDir` by default; PVC named by spec metadata `workspace_pvc` (destroy retains the PVC) |
+| execute | exec API; k8s exec carries no per-call cwd/env, so commands are composed as `timeout -s KILL N env K=V /bin/sh -c 'cd <cwd> && …'` with a client-side deadline |
+| upload | shared tar builder streamed over exec stdin (EOF via empty stdin frame) |
+| download | `tar -cf - \| base64` over stdout |
+
+Security posture on every Pod: `runAsNonRoot` (uid 65534 default;
+`container_user` metadata override relaxes it only for uid 0),
+capabilities drop `ALL`, `allowPrivilegeEscalation=false`,
+read-only root filesystem (overridable), seccomp `RuntimeDefault`,
+`automountServiceAccountToken=false`, hostNetwork/PID/IPC disabled,
+dangerous mount targets rejected (same rule set as the Docker
+provider).
+
+Testing: 40 pure-helper unit tests (manifest, policies, exec argv,
+startup-state helpers) run without a cluster; the full provider
+contract suite and timeout-enforcement test are gated on cluster
+availability and are pending integration verification on a real
+cluster.
+
 ---
 
 ## 12. Sandbox and DeepAgents
