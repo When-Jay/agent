@@ -704,8 +704,9 @@ V1 includes:
 
 V1 does not include:
 
-* Sandbox pooling
-* Warm sandbox scheduling
+* Sandbox pooling / warm sandbox scheduling — specified as an
+  optional, default-off extension (sandbox-warm-pool-spec.md,
+  plan 043); disabled by default
 * Advanced VM isolation
 * GPU sandbox scheduling
 * Multi-region scheduling

@@ -665,8 +665,9 @@ How much output?
 
 The first version does not implement:
 
-* Sandbox pooling
-* Warm containers
+* Sandbox pooling and warm containers — specified as an optional,
+  default-off extension in sandbox-warm-pool-spec.md (plan 043);
+  not part of the core V1 contract and disabled by default
 * GPU scheduling
 * VM-level isolation
 * Multi-region scheduling

@@ -19,6 +19,7 @@ from agent_platform.runtime.dispatch.celery_app import (
     PATROL_TASK_NAME,
     RESUME_TASK_NAME,
     TASK_NAME,
+    WARM_POOL_MAINTAIN_TASK_NAME,
     create_celery_app,
 )
 
@@ -58,10 +59,34 @@ def _patrol_beat_schedule() -> dict[str, Any]:
     return {"evaluation-patrol": {"task": PATROL_TASK_NAME, "schedule": schedule}}
 
 
+def _warm_pool_beat_schedule() -> dict[str, Any]:
+    """Beat entry for the warm-pool maintainer (plan 043, spec section 7.1).
+
+    仅在 SANDBOX_WARM_POOL_ENABLED=1 时注册（默认关闭 = 无任务、无键）；
+    interval 非法（<=0）时告警并跳过，beat 服务空转无害。
+    """
+    if not _settings.sandbox_warm_pool_enabled:
+        return {}
+    interval = _settings.sandbox_warm_pool_maintain_interval_seconds
+    if interval <= 0:
+        logger.warning(
+            "invalid SANDBOX_WARM_POOL_MAINTAIN_INTERVAL_SECONDS %r; "
+            "warm pool maintenance not scheduled",
+            interval,
+        )
+        return {}
+    return {
+        "sandbox-warm-pool-maintain": {
+            "task": WARM_POOL_MAINTAIN_TASK_NAME,
+            "schedule": float(interval),
+        }
+    }
+
+
 celery_app = create_celery_app(
     _settings.redis_url,
     eager=_settings.celery_task_always_eager,
-    beat_schedule=_patrol_beat_schedule(),
+    beat_schedule={**_patrol_beat_schedule(), **_warm_pool_beat_schedule()},
 )
 
 _orchestrator_builder: Callable[[], object] | None = None
@@ -268,3 +293,69 @@ def execute_evaluation_patrol() -> str:
     )
     _export_evaluation_scores(run.id)
     return run.id
+
+
+_warm_pool_maintainer_builder: Callable[[], object] | None = None
+
+
+def set_warm_pool_maintainer_builder(builder: Callable[[], object]) -> None:
+    """Override warm-pool maintainer composition (tests / custom deployments)."""
+    global _warm_pool_maintainer_builder
+    _warm_pool_maintainer_builder = builder
+
+
+def _default_warm_pool_maintainer_builder():
+    """Compose the worker-side WarmPoolMaintainer (plan 043, spec section 7).
+
+    Templates are parsed and policy-validated here (worker side) — invalid
+    configuration fails the task loudly instead of silently starving the pool.
+    Providers are used directly through the registry; pool sandboxes are
+    never registered in a SandboxManager of this process.
+    """
+    from agent_platform.sandbox.providers.docker import DockerSandboxProvider
+    from agent_platform.sandbox.providers.kubernetes import KubernetesSandboxProvider
+    from agent_platform.sandbox.registry import SandboxProviderRegistry
+    from agent_platform.sandbox.warm_pool import (
+        WarmPoolMaintainer,
+        WarmPoolStore,
+        parse_templates,
+        validate_templates,
+    )
+
+    templates = parse_templates(_settings.sandbox_warm_pool_templates_json)
+    validate_templates(templates)
+    registry = SandboxProviderRegistry()
+    registry.register(DockerSandboxProvider.provider_name, DockerSandboxProvider())
+    registry.register(
+        KubernetesSandboxProvider.provider_name, KubernetesSandboxProvider()
+    )
+    store = WarmPoolStore(
+        _settings.redis_url,
+        templates,
+        claim_timeout_ms=_settings.sandbox_warm_pool_claim_timeout_ms,
+    )
+    return WarmPoolMaintainer(
+        registry,
+        store,
+        templates,
+        max_total=_settings.sandbox_warm_pool_max_total,
+        max_idle_seconds=_settings.sandbox_warm_pool_max_idle_seconds,
+        maintain_interval_seconds=_settings.sandbox_warm_pool_maintain_interval_seconds,
+    )
+
+
+@celery_app.task(name=WARM_POOL_MAINTAIN_TASK_NAME)
+def maintain_warm_pools() -> str:
+    """Warm-pool upkeep: top-up / health / age cycle (plan 043).
+
+    Disabled or Redis-down cycles are no-ops/ logged, never raise: the
+    pool degrades to cold creation only.
+    """
+    if not _settings.sandbox_warm_pool_enabled:
+        return ""
+    import asyncio
+
+    builder = _warm_pool_maintainer_builder or _default_warm_pool_maintainer_builder
+    maintainer = builder()
+    asyncio.run(maintainer.run_cycle())
+    return "maintained"

@@ -25,9 +25,11 @@ from agent_platform.sandbox.models import (
     Sandbox,
     SandboxSpec,
     SandboxStatus,
+    WorkspaceMount,
 )
 from agent_platform.sandbox.policy import PolicyValidator, SandboxPolicy
 from agent_platform.sandbox.registry import SandboxProviderRegistry
+from agent_platform.sandbox.warm_pool import is_pool_eligible
 
 logger = logging.getLogger(__name__)
 
@@ -41,10 +43,15 @@ class SandboxManager:
         *,
         policy: SandboxPolicy | None = None,
         default_provider: str | None = None,
+        warm_pool=None,
     ) -> None:
         self._registry = registry
         self._policy = policy or SandboxPolicy()
         self._default_provider = default_provider
+        # Optional warm-pool collaborator (sandbox-warm-pool-spec.md): the
+        # manager knows only "claim(spec, provider) -> Sandbox | None" and
+        # contains no pool internals. None = pool disabled, zero overhead.
+        self._warm_pool = warm_pool
         self._validator = PolicyValidator()
         self._sandboxes: dict[str, Sandbox] = {}
         self._results: dict[tuple[str, str], ExecutionResult] = {}
@@ -56,7 +63,12 @@ class SandboxManager:
             raise ProviderError("no provider selected and no default provider configured")
         provider_obj = self._registry.get(provider_name)
 
-        assigned = replace(spec, sandbox_id=spec.sandbox_id or str(uuid4()))
+        if self._warm_pool is not None and is_pool_eligible(spec):
+            warm = await self._claim_warm(provider_name, provider_obj, spec)
+            if warm is not None:
+                return warm
+
+        assigned = self._assign_ids(spec)
         sandbox = await self._normalize(provider_name, lambda: provider_obj.create(assigned))
         sandbox.provider = provider_name
         sandbox.status = SandboxStatus.CREATING
@@ -153,6 +165,58 @@ class SandboxManager:
 
     def _require_provider(self, sandbox: Sandbox) -> SandboxProvider:
         return self._registry.get(sandbox.provider)
+
+    def _assign_ids(self, spec: SandboxSpec) -> SandboxSpec:
+        # Warm-pool spec section 4.1: an empty workspace_id declares an
+        # ephemeral workspace ("any fresh workspace"). Providers require a
+        # non-empty id, so the manager assigns one (previously ProviderError).
+        assigned = replace(spec, sandbox_id=spec.sandbox_id or str(uuid4()))
+        if not assigned.workspace.workspace_id:
+            workspace = replace(assigned.workspace, workspace_id=str(uuid4()))
+            assigned = replace(assigned, workspace=workspace)
+        return assigned
+
+    async def _claim_warm(self, provider_name: str, provider_obj: SandboxProvider, spec: SandboxSpec) -> Sandbox | None:
+        """Claim path (sandbox-warm-pool-spec.md section 5.2). Never raises."""
+        try:
+            sandbox = self._warm_pool.claim(spec, provider_name)
+        except Exception:  # noqa: BLE001 - any pool failure degrades to cold create
+            logger.warning("warm pool claim failed; falling back to cold create", exc_info=True)
+            return None
+        if sandbox is None:
+            return None
+        try:
+            health = await provider_obj.health_check(sandbox)
+        except Exception as exc:  # noqa: BLE001 - treat probe crash as unhealthy
+            logger.warning(
+                "warm pool: health check of claimed sandbox %s failed", sandbox.sandbox_id, exc_info=True
+            )
+            health = HealthStatus(healthy=False, detail=str(exc))
+        if not health.healthy:
+            try:
+                await provider_obj.destroy(sandbox)
+            except Exception:  # noqa: BLE001 - never hand out unhealthy; cold path continues
+                logger.warning(
+                    "warm pool: destroy of unhealthy claimed sandbox %s failed",
+                    sandbox.sandbox_id,
+                    exc_info=True,
+                )
+            return None
+        # Specialize identity (platform records only; infra labels stay the
+        # pool system identity -- spec section 9.4). sandbox_id/workspace_id/
+        # endpoints are pool-issued and unchanged (section 5.2).
+        sandbox.tenant_id = spec.tenant_id
+        sandbox.user_id = spec.user_id
+        sandbox.session_id = spec.session_id
+        sandbox.last_heartbeat = _now()
+        sandbox.status = SandboxStatus.READY
+        self._sandboxes[sandbox.sandbox_id] = sandbox
+        logger.info(
+            "sandbox %s claimed from warm pool (template %s)",
+            sandbox.sandbox_id,
+            sandbox.metadata.get("warm_pool_template", ""),
+        )
+        return sandbox
 
     async def _normalize(self, provider_name: str, call):
         try:

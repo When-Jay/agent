@@ -14,6 +14,7 @@ RESUME_TASK_NAME = "agent_platform.runtime.dispatch.resume_run"
 EVALUATION_TASK_NAME = "agent_platform.evaluation.execute_evaluation_run"
 EVOLUTION_TASK_NAME = "agent_platform.evolution.execute_evolution_run"
 PATROL_TASK_NAME = "agent_platform.evaluation.execute_evaluation_patrol"
+WARM_POOL_MAINTAIN_TASK_NAME = "agent_platform.sandbox.maintain_warm_pools"
 _TASKS_MODULE = "agent_platform.runtime.dispatch.tasks"
 
 

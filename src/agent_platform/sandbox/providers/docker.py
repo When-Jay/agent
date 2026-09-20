@@ -475,6 +475,28 @@ class DockerSandboxProvider:
         await asyncio.to_thread(_remove)
         logger.info("docker container %s removed (workspace retained)", container_id[:12])
 
+    async def destroy_workspace(self, workspace: WorkspaceMount) -> None:
+        """Remove the host workspace directory (warm-pool spec section 7.4).
+
+        Optional capability used by the warm-pool maintainer when evicting
+        a *never-claimed* sandbox: pool members provably hold no session
+        data, so their workspace directory can be deleted instead of
+        retained. Must never be called for a claimed sandbox (normal
+        destroy keeps the workspace).
+        """
+        workspace_id = workspace.workspace_id if workspace else ""
+        if not workspace_id:
+            return
+        host_dir = Path(self._workspace_root) / workspace_id
+
+        def _rmtree():
+            import shutil
+
+            shutil.rmtree(host_dir, ignore_errors=True)  # tolerate missing dir
+
+        await asyncio.to_thread(_rmtree)
+        logger.info("docker workspace directory %s removed", host_dir)
+
     # -- internal -------------------------------------------------------------
 
     def _docker(self):

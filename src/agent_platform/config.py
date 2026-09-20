@@ -66,3 +66,23 @@ class Settings:
     db_pool_size: int = field(default_factory=lambda: _env_int("DB_POOL_SIZE", 10))
     db_max_overflow: int = field(default_factory=lambda: _env_int("DB_MAX_OVERFLOW", 20))
     db_pool_recycle: int = field(default_factory=lambda: _env_int("DB_POOL_RECYCLE", 1800))
+    # Sandbox warm pool（sandbox-warm-pool-spec.md）。默认关闭：未启用时
+    # 不触碰 Redis、不注册 beat 任务。templates 为 JSON 数组字符串（镜像
+    # MCP_SERVERS_JSON 惯例），仅在 enabled 时由 warm_pool.parse_templates
+    # 解析校验；Settings 只存原始字符串。
+    sandbox_warm_pool_enabled: bool = field(default_factory=lambda: _env_bool("SANDBOX_WARM_POOL_ENABLED", False))
+    sandbox_warm_pool_templates_json: str = field(
+        default_factory=lambda: getenv("SANDBOX_WARM_POOL_TEMPLATES_JSON", "")
+    )
+    sandbox_warm_pool_max_total: int = field(
+        default_factory=lambda: _env_int("SANDBOX_WARM_POOL_MAX_TOTAL", 32)
+    )
+    sandbox_warm_pool_max_idle_seconds: float = field(
+        default_factory=lambda: _env_float("SANDBOX_WARM_POOL_MAX_IDLE_SECONDS", 900)
+    )
+    sandbox_warm_pool_maintain_interval_seconds: float = field(
+        default_factory=lambda: _env_float("SANDBOX_WARM_POOL_MAINTAIN_INTERVAL_SECONDS", 30)
+    )
+    sandbox_warm_pool_claim_timeout_ms: int = field(
+        default_factory=lambda: _env_int("SANDBOX_WARM_POOL_CLAIM_TIMEOUT_MS", 1000)
+    )

@@ -61,6 +61,13 @@
 * `REDIS_EVENT_FANOUT_ENABLED=1` 在多进程部署下**必须开启**：
   API 的 SSE 订阅依赖 worker 通过 Redis 发布的事件流，steering
   队列共享同一开关。
+* **Sandbox warm pool**（默认关闭）：`SANDBOX_WARM_POOL_ENABLED=1`
+  时，beat 追加注册 `agent_platform.sandbox.maintain_warm_pools`
+  （周期 `SANDBOX_WARM_POOL_MAINTAIN_INTERVAL_SECONDS`，跑在
+  `default` 队列，由 `worker` 消费），维护循环通过 Redis 维护锁
+  防止 HA beat 双跑；池状态存于 Redis，`worker` 与 API 多进程均
+  可原子 claim，任何池故障自动回落冷创建。配置见
+  `docs/specs/sandbox-warm-pool-spec.md`。
 * 模型密钥（`ANTHROPIC_API_KEY` 等）由宿主机环境变量透传，
   不写入镜像；模型选择在 application metadata 中配置
   `{'agent': {'model': '<provider>:<model-name>'}}`。
